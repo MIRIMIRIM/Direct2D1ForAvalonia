@@ -19,15 +19,15 @@ namespace Avalonia.Direct2D1.Media
     /// </summary>
     internal class DrawingContextImpl : IDrawingContextImpl
     {
-        private readonly ILayerFactory _layerFactory;
+        private readonly ILayerFactory? _layerFactory;
         private readonly ID2D1RenderTarget _renderTarget;
         private readonly ID2D1DeviceContext _deviceContext;
         private readonly bool _ownsDeviceContext;
-        private readonly IDXGISwapChain1 _swapChain;
-        private readonly Action _finishedCallback;
+        private readonly IDXGISwapChain1? _swapChain;
+        private readonly Action? _finishedCallback;
 
         private readonly Stack<RenderOptions> _renderOptionsStack = new Stack<RenderOptions>();
-        private readonly Stack<ID2D1Layer> _layers = new Stack<ID2D1Layer>();
+        private readonly Stack<ID2D1Layer?> _layers = new Stack<ID2D1Layer?>();
         private readonly Stack<ID2D1Layer> _layerPool = new Stack<ID2D1Layer>();
         private RenderOptions _renderOptions;
         private readonly Matrix? _postTransform;
@@ -45,11 +45,11 @@ namespace Avalonia.Direct2D1.Media
         /// <param name="swapChain">An optional swap chain associated with this drawing context.</param>
         /// <param name="finishedCallback">An optional delegate to be called when context is disposed.</param>
         public DrawingContextImpl(
-            ILayerFactory layerFactory,
+            ILayerFactory? layerFactory,
             ID2D1RenderTarget renderTarget,
             bool useScaledDrawing,
-            IDXGISwapChain1 swapChain = null,
-            Action finishedCallback = null)
+            IDXGISwapChain1? swapChain = null,
+            Action? finishedCallback = null)
         {
             _layerFactory = layerFactory;
             _renderTarget = renderTarget;
@@ -250,9 +250,9 @@ namespace Avalonia.Direct2D1.Media
         /// <param name="pen">The stroke pen.</param>
         /// <param name="p1">The first point of the line.</param>
         /// <param name="p2">The second point of the line.</param>
-        public void DrawLine(IPen pen, Point p1, Point p2)
+        public void DrawLine(IPen? pen, Point p1, Point p2)
         {
-            if (pen != null)
+            if (pen?.Brush != null)
             {
                 var bounds = new Rect(p1, p2);
 
@@ -278,7 +278,7 @@ namespace Avalonia.Direct2D1.Media
         /// <param name="brush">The fill brush.</param>
         /// <param name="pen">The stroke pen.</param>
         /// <param name="geometry">The geometry.</param>
-        public void DrawGeometry(IBrush brush, IPen pen, IGeometryImpl geometry)
+        public void DrawGeometry(IBrush? brush, IPen? pen, IGeometryImpl geometry)
         {
             if (brush != null)
             {
@@ -292,7 +292,7 @@ namespace Avalonia.Direct2D1.Media
                 }
             }
 
-            if (pen != null)
+            if (pen?.Brush != null)
             {
                 using (var d2dBrush = CreateBrush(pen.Brush, geometry.GetRenderBounds(pen)))
                 using (var d2dStroke = pen.ToDirect2DStrokeStyle(_deviceContext))
@@ -307,7 +307,7 @@ namespace Avalonia.Direct2D1.Media
         }
 
         /// <inheritdoc />
-        public void DrawRectangle(IBrush brush, IPen pen, RoundedRect rrect, BoxShadows boxShadow = default)
+        public void DrawRectangle(IBrush? brush, IPen? pen, RoundedRect rrect, BoxShadows boxShadow = default)
         {
             var rc = rrect.Rect.ToDirect2D();
             var rect = rrect.Rect;
@@ -374,13 +374,13 @@ namespace Avalonia.Direct2D1.Media
             }
         }
 
-        public void DrawRegion(IBrush brush, IPen pen, IPlatformRenderInterfaceRegion region)
+        public void DrawRegion(IBrush? brush, IPen? pen, IPlatformRenderInterfaceRegion region)
         {
             throw new NotSupportedException();
         }
 
         /// <inheritdoc />
-        public void DrawEllipse(IBrush brush, IPen pen, Rect rect)
+        public void DrawEllipse(IBrush? brush, IPen? pen, Rect rect)
         {
             var rc = rect.ToDirect2D();
 
@@ -423,7 +423,7 @@ namespace Avalonia.Direct2D1.Media
         /// </summary>
         /// <param name="foreground">The foreground.</param>
         /// <param name="glyphRun">The glyph run.</param>
-        public void DrawGlyphRun(IBrush foreground, IGlyphRunImpl glyphRun)
+        public void DrawGlyphRun(IBrush? foreground, IGlyphRunImpl glyphRun)
         {
             using (var brush = CreateBrush(foreground, glyphRun.Bounds))
             {
@@ -564,7 +564,7 @@ namespace Avalonia.Direct2D1.Media
         /// <param name="brush">The avalonia brush.</param>
         /// <param name="destinationRect">The size of the brush's target area.</param>
         /// <returns>The Direct2D brush wrapper.</returns>
-        public BrushImpl CreateBrush(IBrush brush, Rect destinationRect)
+        public BrushImpl CreateBrush(IBrush? brush, Rect destinationRect)
         {
             var solidColorBrush = brush as ISolidColorBrush;
             var linearGradientBrush = brush as ILinearGradientBrush;
@@ -601,7 +601,10 @@ namespace Avalonia.Direct2D1.Media
             }
             else if (sceneBrush != null || sceneBrushContent != null)
             {
-                sceneBrushContent ??= sceneBrush.CreateContent();
+                if (sceneBrushContent == null && sceneBrush != null)
+                {
+                    sceneBrushContent = sceneBrush.CreateContent();
+                }
                 if (sceneBrushContent != null)
                 {
                     var rect = sceneBrushContent.Rect;
@@ -713,7 +716,7 @@ namespace Avalonia.Direct2D1.Media
             PopLayer();
         }
 
-        public object GetFeature(Type t) => null;
+        public object? GetFeature(Type t) => null;
 
         private void ApplyRenderOptions(RenderOptions renderOptions)
         {

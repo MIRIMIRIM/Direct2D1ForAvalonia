@@ -1,4 +1,5 @@
-﻿using Avalonia.Direct2D1.Media;
+using System;
+using Avalonia.Direct2D1.Media;
 using Avalonia.Direct2D1.Media.Imaging;
 using Avalonia.Platform;
 using Vortice.Direct2D1;
@@ -10,8 +11,8 @@ namespace Avalonia.Direct2D1
     {
         private Vortice.Mathematics.SizeI _savedSize;
         private Vortice.Mathematics.Size _savedDpi;
-        private ID2D1DeviceContext _deviceContext;
-        private IDXGISwapChain1 _swapChain;
+        private ID2D1DeviceContext? _deviceContext;
+        private IDXGISwapChain1? _swapChain;
 
         /// <summary>
         /// Creates a drawing context for a rendering session.
@@ -30,7 +31,8 @@ namespace Avalonia.Direct2D1
                 Resize();
             }
 
-            return new DrawingContextImpl(this, _deviceContext, useScaledDrawing, _swapChain);
+            var deviceContext = _deviceContext ?? throw new InvalidOperationException("Device context is not available.");
+            return new DrawingContextImpl(this, deviceContext, useScaledDrawing, _swapChain);
         }
 
         public bool IsCorrupted => false;
@@ -42,7 +44,8 @@ namespace Avalonia.Direct2D1
                 CreateDeviceContext();
             }
 
-            return D2DRenderTargetBitmapImpl.CreateCompatible(_deviceContext, size);
+            var deviceContext = _deviceContext ?? throw new InvalidOperationException("Device context is not available.");
+            return D2DRenderTargetBitmapImpl.CreateCompatible(deviceContext, size);
         }
 
         public void Dispose()
@@ -96,17 +99,19 @@ namespace Avalonia.Direct2D1
                 CreateSwapChain();
             }
 
-            using (var dxgiBackBuffer = _swapChain.GetBuffer<IDXGISurface>(0))
+            var swapChain = _swapChain ?? throw new InvalidOperationException("Swap chain is not available.");
+
+            using (var dxgiBackBuffer = swapChain.GetBuffer<IDXGISurface>(0))
             using (var d2dBackBuffer = _deviceContext.CreateBitmapFromDxgiSurface(
                 dxgiBackBuffer,
-                new BitmapProperties1(
+                    new BitmapProperties1(
                     new Vortice.DCommon.PixelFormat
                     {
                         AlphaMode = Vortice.DCommon.AlphaMode.Premultiplied,
                         Format = Format.B8G8R8A8_UNorm
                     },
-                    _savedSize.Width,
-                    _savedSize.Height,
+                    _savedDpi.Width,
+                    _savedDpi.Height,
                     BitmapOptions.Target | BitmapOptions.CannotDraw)))
             {
                 _deviceContext.Target = d2dBackBuffer;

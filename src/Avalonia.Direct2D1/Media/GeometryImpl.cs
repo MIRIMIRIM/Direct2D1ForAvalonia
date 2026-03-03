@@ -22,7 +22,7 @@ namespace Avalonia.Direct2D1.Media
         public ID2D1Geometry Geometry { get; } = geometry;
 
         /// <inheritdoc/>
-        public Rect GetRenderBounds(IPen pen)
+        public Rect GetRenderBounds(IPen? pen)
         {
             if (pen == null || Math.Abs(pen.Thickness) < float.Epsilon)
                 return Geometry.GetBounds().ToAvalonia();
@@ -76,7 +76,7 @@ namespace Avalonia.Direct2D1.Media
         }
 
         /// <inheritdoc/>
-        public bool StrokeContains(Avalonia.Media.IPen pen, Point point)
+        public bool StrokeContains(Avalonia.Media.IPen? pen, Point point)
         {
             return Geometry.StrokeContainsPoint(point.ToVortice(), (float)(pen?.Thickness ?? 0));
         }
@@ -113,7 +113,7 @@ namespace Avalonia.Direct2D1.Media
             // Direct2D doesnt have this too sadly.
             Logger.TryGet(LogEventLevel.Warning, LogArea.Visual)?.Log(this, "TryGetSegment is not available in Direct2D.");
 
-            segmentGeometry = null;
+            segmentGeometry = null!;
             return false;
         }
 

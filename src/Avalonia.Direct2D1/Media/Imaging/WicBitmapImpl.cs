@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using Avalonia.Win32.Interop;
 using Vortice.WIC;
 using APixelFormat = Avalonia.Platform.PixelFormat;
 using AlphaFormat = Avalonia.Platform.AlphaFormat;
@@ -15,7 +14,7 @@ namespace Avalonia.Direct2D1.Media
     /// </summary>
     internal class WicBitmapImpl : BitmapImpl, IReadableBitmapWithAlphaImpl
     {
-        private readonly IWICBitmapDecoder _decoder;
+        private readonly IWICBitmapDecoder? _decoder;
 
         private static BitmapInterpolationMode ConvertInterpolationMode(Avalonia.Media.Imaging.BitmapInterpolationMode interpolationMode)
         {
@@ -105,12 +104,29 @@ namespace Avalonia.Direct2D1.Media
 
             using (var l = WicImpl.Lock(BitmapLockFlags.Write))
             {
-                for (var row = 0; row < size.Height; row++)
+                var sourceStride = stride;
+                var destinationStride = (int)l.Stride;
+                var rowBytes = Math.Min(sourceStride, destinationStride);
+
+                unsafe
                 {
-                    UnmanagedMethods.CopyMemory(
-                        (IntPtr)(l.Data.DataPointer + row * l.Stride),
-                        (data + row * stride),
-                        (UIntPtr)l.Data.Pitch);
+                    var sourceBase = (byte*)data;
+                    var destinationBase = (byte*)l.Data.DataPointer;
+
+                    if (rowBytes == sourceStride && rowBytes == destinationStride)
+                    {
+                        var totalBytes = checked((long)rowBytes * size.Height);
+                        Buffer.MemoryCopy(sourceBase, destinationBase, totalBytes, totalBytes);
+                    }
+                    else
+                    {
+                        for (var row = 0; row < size.Height; row++)
+                        {
+                            var sourceRow = sourceBase + (row * sourceStride);
+                            var destinationRow = destinationBase + (row * destinationStride);
+                            Buffer.MemoryCopy(sourceRow, destinationRow, rowBytes, rowBytes);
+                        }
+                    }
                 }
             }
         }
@@ -254,7 +270,12 @@ namespace Avalonia.Direct2D1.Media
 
         APixelFormat? IReadableBitmapImpl.Format => PixelFormat;
 
-        public ILockedFramebuffer Lock() =>
-            new LockedBitmap(this, WicImpl.Lock(BitmapLockFlags.Write), PixelFormat.Value);
+        public ILockedFramebuffer Lock()
+        {
+            if (PixelFormat is not APixelFormat pixelFormat)
+                throw new InvalidOperationException("Bitmap pixel format is unknown.");
+
+            return new LockedBitmap(this, WicImpl.Lock(BitmapLockFlags.Write), pixelFormat);
+        }
     }
 }

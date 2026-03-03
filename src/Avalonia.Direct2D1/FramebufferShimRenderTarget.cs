@@ -4,7 +4,6 @@ using System;
 using Avalonia.Controls.Platform.Surfaces;
 using Avalonia.Direct2D1.Media;
 using Avalonia.Platform;
-using Avalonia.Win32.Interop;
 using Vortice.WIC;
 using PixelFormat = Avalonia.Platform.PixelFormat;
 
@@ -58,12 +57,30 @@ namespace Avalonia.Direct2D1
                 {
                     using (var l = WicImpl.Lock(BitmapLockFlags.Read))
                     {
-                        for (var y = 0; y < _target.Size.Height; y++)
+                        var sourceStride = (int)l.Stride;
+                        var destinationStride = _target.RowBytes;
+                        var rowBytes = Math.Min(sourceStride, destinationStride);
+
+                        unsafe
                         {
-                            UnmanagedMethods.CopyMemory(
-                                (IntPtr)(_target.Address + _target.RowBytes * y),
-                                (IntPtr)(l.Data.DataPointer + l.Stride * y),
-                                (UIntPtr)Math.Min(l.Stride, _target.RowBytes));
+                            var sourceBase = (byte*)l.Data.DataPointer;
+                            var destinationBase = (byte*)_target.Address;
+
+                            var height = _target.Size.Height;
+                            if (rowBytes == sourceStride && rowBytes == destinationStride)
+                            {
+                                var totalBytes = checked((long)rowBytes * height);
+                                Buffer.MemoryCopy(sourceBase, destinationBase, totalBytes, totalBytes);
+                            }
+                            else
+                            {
+                                for (var y = 0; y < height; y++)
+                                {
+                                    var sourceRow = sourceBase + (y * sourceStride);
+                                    var destinationRow = destinationBase + (y * destinationStride);
+                                    Buffer.MemoryCopy(sourceRow, destinationRow, rowBytes, rowBytes);
+                                }
+                            }
                         }
                     }
                     Dispose();

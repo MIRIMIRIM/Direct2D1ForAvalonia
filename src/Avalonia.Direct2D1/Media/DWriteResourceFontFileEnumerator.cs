@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using SharpGen.Runtime;
 using Vortice;
@@ -16,7 +17,7 @@ namespace Avalonia.Direct2D1.Media
         private readonly IDWriteFactory _factory;
         private readonly IDWriteFontFileLoader _loader;
         private readonly DataStream _keyStream;
-        private IDWriteFontFile _currentFontFile;
+        private IDWriteFontFile? _currentFontFile;
         private static readonly HashSet<object> s_instances = new HashSet<object>();
 
         /// <param name="factory">The factory.</param>
@@ -62,6 +63,11 @@ namespace Avalonia.Direct2D1.Media
         /// <unmanaged>HRESULT IDWriteFontFileEnumerator::GetCurrentFontFile([Out] IDWriteFontFile** fontFile)</unmanaged>
         IDWriteFontFile IDWriteFontFileEnumerator.GetCurrentFontFile()
         {
+            if (_currentFontFile == null)
+            {
+                throw new InvalidOperationException("No current font file. Call MoveNext() first.");
+            }
+
             _currentFontFile.AddRef();
 
             return _currentFontFile;

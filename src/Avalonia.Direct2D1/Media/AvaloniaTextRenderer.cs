@@ -31,9 +31,17 @@ namespace Avalonia.Direct2D1.Media
             var wrapper = (BrushWrapper)Marshal.GetObjectForIUnknown(comObject.NativePointer);
 
             // TODO: Work out how to get the size below rather than passing new Size().
-            var brush = (wrapper == null) ?
-                _foreground :
-                _context.CreateBrush(wrapper.Brush, default).PlatformBrush;
+            ID2D1Brush brush = _foreground;
+            var shouldDisposeBrush = false;
+            if (wrapper != null)
+            {
+                var createdBrush = _context.CreateBrush(wrapper.Brush, default).PlatformBrush;
+                if (createdBrush != null)
+                {
+                    brush = createdBrush;
+                    shouldDisposeBrush = true;
+                }
+            }
 
             _renderTarget.DrawGlyphRun(
                 new Vector2 { X = baselineOriginX, Y = baselineOriginY },
@@ -41,7 +49,7 @@ namespace Avalonia.Direct2D1.Media
                 brush,
                 measuringMode);
 
-            if (wrapper != null)
+            if (shouldDisposeBrush)
             {
                 brush.Dispose();
             }

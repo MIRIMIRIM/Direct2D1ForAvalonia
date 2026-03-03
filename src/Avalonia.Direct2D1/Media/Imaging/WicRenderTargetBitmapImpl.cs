@@ -38,7 +38,7 @@ namespace Avalonia.Direct2D1.Media
 
         public bool IsCorrupted => false;
 
-        public IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing, Action finishedCallback)
+        public IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing, Action? finishedCallback)
         {
             return new DrawingContextImpl(null, _renderTarget, useScaledDrawing, finishedCallback: () =>
                 {

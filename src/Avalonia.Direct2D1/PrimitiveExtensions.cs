@@ -116,7 +116,7 @@ namespace Avalonia.Direct2D1
                 EndCap = d2dLineCap,
                 DashCap = d2dLineCap
             };
-            float[] dashes = null;
+            float[]? dashes = null;
             if (pen.DashStyle?.Dashes != null && pen.DashStyle.Dashes.Count > 0)
             {
                 properties.DashStyle = DashStyle.Custom;

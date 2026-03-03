@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.Versioning;
 using Avalonia.Controls.Platform.Surfaces;
 using Avalonia.Direct2D1.Media;
 using Avalonia.Direct2D1.Media.Imaging;
@@ -20,10 +21,14 @@ using BitmapInterpolationMode = Avalonia.Media.Imaging.BitmapInterpolationMode;
 
 namespace Avalonia
 {
+    [SupportedOSPlatform("windows")]
     public static class Direct2DApplicationExtensions
     {
         public static AppBuilder UseDirect2D1(this AppBuilder builder)
         {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("Avalonia.Direct2D1 is only supported on Windows.");
+
             builder.UseRenderingSubsystem(Direct2D1.Direct2D1Platform.Initialize, "Direct2D1");
             return builder;
         }
@@ -32,21 +37,22 @@ namespace Avalonia
 
 namespace Avalonia.Direct2D1
 {
+    [SupportedOSPlatform("windows")]
     internal class Direct2D1Platform : IPlatformRenderInterface
     {
         private static readonly Direct2D1Platform s_instance = new Direct2D1Platform();
 
-        public static ID3D11Device Direct3D11Device { get; private set; }
+        public static ID3D11Device Direct3D11Device { get; private set; } = null!;
 
-        public static ID2D1Factory1 Direct2D1Factory { get; private set; }
+        public static ID2D1Factory1 Direct2D1Factory { get; private set; } = null!;
 
-        public static ID2D1Device Direct2D1Device { get; private set; }
+        public static ID2D1Device Direct2D1Device { get; private set; } = null!;
 
-        public static IDWriteFactory1 DirectWriteFactory { get; private set; }
+        public static IDWriteFactory1 DirectWriteFactory { get; private set; } = null!;
 
-        public static IWICImagingFactory ImagingFactory { get; private set; }
+        public static IWICImagingFactory ImagingFactory { get; private set; } = null!;
 
-        public static IDXGIDevice1 DxgiDevice { get; private set; }
+        public static IDXGIDevice1 DxgiDevice { get; private set; } = null!;
 
         private static readonly object s_initLock = new object();
         private static bool s_initialized = false;
@@ -111,6 +117,9 @@ namespace Avalonia.Direct2D1
 
         public static void Initialize()
         {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("Avalonia.Direct2D1 is only supported on Windows.");
+
             SharpGen.Runtime.Configuration.EnableReleaseOnFinalizer = true;
             InitializeDirect2D();
             AvaloniaLocator.CurrentMutable
@@ -175,7 +184,7 @@ namespace Avalonia.Direct2D1
             {
                 _platform = platform;
             }
-            public object TryGetFeature(Type featureType) => null;
+            public object? TryGetFeature(Type featureType) => null;
 
             public IDrawingContextLayerImpl CreateOffscreenRenderTarget(PixelSize pixelSize, double scaling)
             {
@@ -192,7 +201,7 @@ namespace Avalonia.Direct2D1
             public IReadOnlyDictionary<Type, object> PublicFeatures { get; } = new Dictionary<Type, object>();
         }
 
-        public IPlatformRenderInterfaceContext CreateBackendContext(IPlatformGraphicsContext graphicsContext) =>
+        public IPlatformRenderInterfaceContext CreateBackendContext(IPlatformGraphicsContext? graphicsContext) =>
             new D2DApi(this);
 
         public IGeometryImpl BuildGlyphRunGeometry(GlyphRun glyphRun)
