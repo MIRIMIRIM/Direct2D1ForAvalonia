@@ -11,6 +11,7 @@ if (!OperatingSystem.IsWindows())
 AppBuilder.Configure<SmokeApp>()
     .UsePlatformDetect()
     .UseDirect2D1()
+    .UseHarfBuzz()
     .SetupWithoutStarting();
 
 using var bitmap = new RenderTargetBitmap(new PixelSize(256, 128), new Vector(96, 96));

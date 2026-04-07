@@ -12,7 +12,7 @@ namespace Avalonia.Direct2D1.Media
     /// <summary>
     /// A WIC implementation of a <see cref="Avalonia.Media.Imaging.Bitmap"/>.
     /// </summary>
-    internal class WicBitmapImpl : BitmapImpl, IReadableBitmapWithAlphaImpl
+    internal class WicBitmapImpl : BitmapImpl, IReadableBitmapImpl
     {
         private readonly IWICBitmapDecoder? _decoder;
 
@@ -265,10 +265,12 @@ namespace Avalonia.Direct2D1.Media
             public int RowBytes => (int)_lock.Stride;
             public Vector Dpi => _parent.Dpi;
             public APixelFormat Format => _format;
+            public AlphaFormat AlphaFormat => _parent.AlphaFormat ?? Platform.AlphaFormat.Premul;
 
         }
 
         APixelFormat? IReadableBitmapImpl.Format => PixelFormat;
+        AlphaFormat? IReadableBitmapImpl.AlphaFormat => AlphaFormat;
 
         public ILockedFramebuffer Lock()
         {

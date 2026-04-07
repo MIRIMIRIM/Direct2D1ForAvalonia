@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Reflection;
 using Avalonia.Media;
 using Avalonia.Platform;
 using Avalonia.Utilities;
@@ -27,9 +28,11 @@ namespace Avalonia.Direct2D1.Media
         private readonly Action? _finishedCallback;
 
         private readonly Stack<RenderOptions> _renderOptionsStack = new Stack<RenderOptions>();
+        private readonly Stack<TextOptions> _textOptionsStack = new Stack<TextOptions>();
         private readonly Stack<ID2D1Layer?> _layers = new Stack<ID2D1Layer?>();
         private readonly Stack<ID2D1Layer> _layerPool = new Stack<ID2D1Layer>();
         private RenderOptions _renderOptions;
+        private TextOptions _textOptions;
         private readonly Matrix? _postTransform;
         private Matrix _transform = Matrix.Identity;
 
@@ -70,7 +73,7 @@ namespace Avalonia.Direct2D1.Media
             if (!useScaledDrawing)
             {
                 var scaling = _renderTarget.Dpi.Width / 96;
-                if (!MathUtilities.AreClose(1, scaling))
+                if (!AreClose(1, scaling))
                     _postTransform = Matrix.CreateScale(1 / scaling, 1 / scaling);
             }
 
@@ -105,6 +108,12 @@ namespace Avalonia.Direct2D1.Media
                 _renderOptions = value;
                 ApplyRenderOptions(value);
             }
+        }
+
+        public TextOptions TextOptions
+        {
+            get => _textOptions;
+            private set => _textOptions = value;
         }
 
         /// <inheritdoc/>
@@ -315,7 +324,7 @@ namespace Avalonia.Direct2D1.Media
                 Math.Max(rrect.RadiiTopRight.X, Math.Max(rrect.RadiiBottomRight.X, rrect.RadiiBottomLeft.X)));
             var radiusY = Math.Max(rrect.RadiiTopLeft.Y,
                 Math.Max(rrect.RadiiTopRight.Y, Math.Max(rrect.RadiiBottomRight.Y, rrect.RadiiBottomLeft.Y)));
-            var isRounded = !MathUtilities.IsZero(radiusX) || !MathUtilities.IsZero(radiusY);
+            var isRounded = !IsZero(radiusX) || !IsZero(radiusY);
 
             if (brush != null)
             {
@@ -430,9 +439,18 @@ namespace Avalonia.Direct2D1.Media
                 var immutableGlyphRun = (GlyphRunImpl)glyphRun;
 
                 var dxGlyphRun = immutableGlyphRun.GlyphRun;
+                var previousTextAntialiasMode = _deviceContext.TextAntialiasMode;
 
-                _renderTarget.DrawGlyphRun(glyphRun.BaselineOrigin.ToVortice(), dxGlyphRun,
-                    brush.PlatformBrush, MeasuringMode.Natural);
+                try
+                {
+                    _deviceContext.TextAntialiasMode = GetEffectiveTextAntialiasMode();
+                    _renderTarget.DrawGlyphRun(glyphRun.BaselineOrigin.ToVortice(), dxGlyphRun,
+                        brush.PlatformBrush, MeasuringMode.Natural);
+                }
+                finally
+                {
+                    _deviceContext.TextAntialiasMode = previousTextAntialiasMode;
+                }
             }
         }
 
@@ -543,9 +561,21 @@ namespace Avalonia.Direct2D1.Media
             RenderOptions = RenderOptions.MergeWith(renderOptions);
         }
 
+        public void PushTextOptions(TextOptions textOptions)
+        {
+            _textOptionsStack.Push(TextOptions);
+
+            TextOptions = TextOptions.MergeWith(textOptions);
+        }
+
         public void PopRenderOptions()
         {
             RenderOptions = _renderOptionsStack.Pop();
+        }
+
+        public void PopTextOptions()
+        {
+            TextOptions = _textOptionsStack.Pop();
         }
 
         private void PopLayer()
@@ -591,12 +621,12 @@ namespace Avalonia.Direct2D1.Media
                 // there is no Direct2D implementation of Conic Gradients so use Radial as a stand-in
                 return new SolidColorBrushImpl(conicGradientBrush, _deviceContext);
             }
-            else if (imageBrush?.Source?.Bitmap != null)
+            else if (imageBrush?.Source is { } imageBrushSource && TryGetImageBrushBitmap(imageBrushSource, out var imageBrushBitmap))
             {
                 return new ImageBrushImpl(
                     imageBrush,
                     _deviceContext,
-                    (BitmapImpl)imageBrush.Source.Bitmap.Item,
+                    imageBrushBitmap,
                     destinationRect);
             }
             else if (sceneBrush != null || sceneBrushContent != null)
@@ -718,24 +748,64 @@ namespace Avalonia.Direct2D1.Media
 
         public object? GetFeature(Type t) => null;
 
+        private static bool TryGetImageBrushBitmap(IImageBrushSource imageBrushSource, out BitmapImpl bitmap)
+        {
+            bitmap = null!;
+
+            var bitmapProperty = imageBrushSource.GetType().GetProperty(
+                "Bitmap",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            var bitmapRef = bitmapProperty?.GetValue(imageBrushSource);
+            if (bitmapRef is null)
+                return false;
+
+            var itemProperty = bitmapRef.GetType().GetProperty("Item", BindingFlags.Instance | BindingFlags.Public);
+            if (itemProperty?.GetValue(bitmapRef) is not BitmapImpl platformBitmap)
+                return false;
+
+            bitmap = platformBitmap;
+            return true;
+        }
+
+        private static bool AreClose(double left, double right) => Math.Abs(left - right) < 0.0001;
+
+        private static bool IsZero(double value) => Math.Abs(value) < 0.0001;
+
         private void ApplyRenderOptions(RenderOptions renderOptions)
         {
             _deviceContext.AntialiasMode = renderOptions.EdgeMode != EdgeMode.Aliased ? AntialiasMode.PerPrimitive : AntialiasMode.Aliased;
-            switch (renderOptions.TextRenderingMode)
+#pragma warning disable CS0618
+            _deviceContext.TextAntialiasMode = GetTextAntialiasMode(renderOptions.TextRenderingMode);
+#pragma warning restore CS0618
+        }
+
+        private TextAntialiasMode GetEffectiveTextAntialiasMode()
+        {
+#pragma warning disable CS0618
+            var textRenderingMode = TextOptions.TextRenderingMode != TextRenderingMode.Unspecified
+                ? TextOptions.TextRenderingMode
+                : RenderOptions.TextRenderingMode;
+#pragma warning restore CS0618
+
+            if (textRenderingMode == TextRenderingMode.Unspecified)
             {
-                case TextRenderingMode.Unspecified:
-                    _deviceContext.TextAntialiasMode = renderOptions.EdgeMode != EdgeMode.Aliased ? TextAntialiasMode.Default : TextAntialiasMode.Aliased;
-                    break;
-                case TextRenderingMode.Alias:
-                    _deviceContext.TextAntialiasMode = TextAntialiasMode.Aliased;
-                    break;
-                case TextRenderingMode.Antialias:
-                    _deviceContext.TextAntialiasMode = TextAntialiasMode.Grayscale;
-                    break;
-                case TextRenderingMode.SubpixelAntialias:
-                    _deviceContext.TextAntialiasMode = TextAntialiasMode.Cleartype;
-                    break;
+                textRenderingMode = RenderOptions.EdgeMode != EdgeMode.Aliased
+                    ? TextRenderingMode.SubpixelAntialias
+                    : TextRenderingMode.Alias;
             }
+
+            return GetTextAntialiasMode(textRenderingMode);
+        }
+
+        private static TextAntialiasMode GetTextAntialiasMode(TextRenderingMode textRenderingMode)
+        {
+            return textRenderingMode switch
+            {
+                TextRenderingMode.Alias => TextAntialiasMode.Aliased,
+                TextRenderingMode.Antialias => TextAntialiasMode.Grayscale,
+                TextRenderingMode.SubpixelAntialias => TextAntialiasMode.Cleartype,
+                _ => TextAntialiasMode.Default
+            };
         }
     }
 }

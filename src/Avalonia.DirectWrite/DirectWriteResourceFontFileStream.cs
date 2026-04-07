@@ -4,21 +4,21 @@ using SharpGen.Runtime;
 using Vortice;
 using Vortice.DirectWrite;
 
-namespace Avalonia.Direct2D1.Media
+namespace Avalonia.DirectWrite
 {
     /// <summary>
     /// This FontFileStream implementation is reading data from a <see cref="DataStream"/>.
     /// </summary>
     /// <remarks>
-    /// Initializes a new instance of the <see cref="DWriteResourceFontFileStream"/> class.
+    /// Initializes a new instance of the <see cref="DirectWriteResourceFontFileStream"/> class.
     /// </remarks>
-    internal class DWriteResourceFontFileStream : CallbackBase, IDWriteFontFileStream
+    internal class DirectWriteResourceFontFileStream : CallbackBase, IDWriteFontFileStream
     {
         private readonly DataStream _stream;
         private static readonly HashSet<object> s_instances = new HashSet<object>();
 
         /// <param name="stream">The stream.</param>
-        public DWriteResourceFontFileStream(DataStream stream)
+        public DirectWriteResourceFontFileStream(DataStream stream)
         {
             s_instances.Add(this);
             _stream = stream;

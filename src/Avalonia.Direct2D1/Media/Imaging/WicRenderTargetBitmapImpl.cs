@@ -5,15 +5,16 @@ using RenderTargetProperties = Vortice.Direct2D1.RenderTargetProperties;
 
 namespace Avalonia.Direct2D1.Media
 {
-    internal class WicRenderTargetBitmapImpl : WicBitmapImpl, IDrawingContextLayerImpl
+    internal class WicRenderTargetBitmapImpl : WicBitmapImpl, IDrawingContextLayerImpl, IRenderTargetBitmapImpl
     {
         private readonly ID2D1RenderTarget _renderTarget;
 
         public WicRenderTargetBitmapImpl(
             PixelSize size,
             Vector dpi,
-            PixelFormat? pixelFormat = null)
-            : base(size, dpi, pixelFormat)
+            PixelFormat? pixelFormat = null,
+            AlphaFormat? alphaFormat = null)
+            : base(size, dpi, pixelFormat, alphaFormat)
         {
             var props = new RenderTargetProperties
             {
@@ -32,6 +33,8 @@ namespace Avalonia.Direct2D1.Media
 
             base.Dispose();
         }
+
+        public IDrawingContextImpl CreateDrawingContext() => CreateDrawingContext(useScaledDrawing: false);
 
         public virtual IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing)
             => CreateDrawingContext(useScaledDrawing, null);

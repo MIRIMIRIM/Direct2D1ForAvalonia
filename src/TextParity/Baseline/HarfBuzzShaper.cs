@@ -31,7 +31,7 @@ namespace TextParity.Baseline
         public static IReadOnlyList<Avalonia.Media.TextFormatting.GlyphInfo> ShapeText(
             ReadOnlyMemory<char> text,
             HarfBuzzSharp.Font font,
-            IGlyphTypeface typeface,
+            GlyphTypeface typeface,
             double fontRenderingEmSize,
             sbyte bidiLevel,
             CultureInfo culture,
@@ -82,10 +82,10 @@ namespace TextParity.Baseline
 
                     if (glyphCluster < containingText.Length && containingText[glyphCluster] == '\t')
                     {
-                        glyphIndex = typeface.GetGlyph(' ');
+                        glyphIndex = typeface.CharacterToGlyphMap[' '];
                         glyphAdvance = incrementalTabWidth > 0 ?
                             incrementalTabWidth :
-                            4 * typeface.GetGlyphAdvance(glyphIndex) * textScale;
+                            4 * GetGlyphAdvance(typeface, glyphIndex) * textScale;
                     }
 
                     results[i] = new Avalonia.Media.TextFormatting.GlyphInfo(glyphIndex, glyphCluster, glyphAdvance, glyphOffset);
@@ -135,13 +135,18 @@ namespace TextParity.Baseline
         {
             var position = glyphPositions[index];
             var offsetX = position.XOffset * textScale;
-            var offsetY = position.YOffset * textScale;
+            var offsetY = -position.YOffset * textScale;
             return new Vector(offsetX, offsetY);
         }
 
         private static double GetGlyphAdvance(ReadOnlySpan<GlyphPosition> glyphPositions, int index, double textScale)
         {
             return glyphPositions[index].XAdvance * textScale;
+        }
+
+        private static ushort GetGlyphAdvance(GlyphTypeface typeface, ushort glyphId)
+        {
+            return typeface.TryGetHorizontalGlyphAdvance(glyphId, out var advance) ? advance : (ushort)0;
         }
 
         private static ReadOnlyMemory<char> GetContainingMemory(ReadOnlyMemory<char> memory, out int start, out int length)

@@ -22,7 +22,8 @@ namespace Avalonia.Direct2D1.Media
             Size size,
             double rotationAngle,
             bool isLargeArc,
-            Avalonia.Media.SweepDirection sweepDirection)
+            Avalonia.Media.SweepDirection sweepDirection,
+            bool isStroked = true)
         {
             _sink.AddArc(new D2D.ArcSegment
             {
@@ -39,7 +40,7 @@ namespace Avalonia.Direct2D1.Media
             _sink.BeginFigure(startPoint.ToVortice(), isFilled ? FigureBegin.Filled : FigureBegin.Hollow);
         }
 
-        public void CubicBezierTo(Point point1, Point point2, Point point3)
+        public void CubicBezierTo(Point point1, Point point2, Point point3, bool isStroked = true)
         {
             _sink.AddBezier(new D2D.BezierSegment
             {
@@ -49,7 +50,7 @@ namespace Avalonia.Direct2D1.Media
             });
         }
 
-        public void QuadraticBezierTo(Point control, Point dest)
+        public void QuadraticBezierTo(Point control, Point dest, bool isStroked = true)
         {
             _sink.AddQuadraticBezier(new D2D.QuadraticBezierSegment
             {
@@ -58,7 +59,7 @@ namespace Avalonia.Direct2D1.Media
             });
         }
 
-        public void LineTo(Point point)
+        public void LineTo(Point point, bool isStroked = true)
         {
             _sink.AddLine(point.ToVortice());
         }

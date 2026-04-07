@@ -485,3 +485,4 @@ $RECYCLE.BIN/
 **/out/*
 **/report.md
 /.vscode
+*.lscache

@@ -3,16 +3,16 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.Versioning;
-using Avalonia.Controls.Platform.Surfaces;
+using Avalonia.DirectWrite;
 using Avalonia.Direct2D1.Media;
 using Avalonia.Direct2D1.Media.Imaging;
 using Avalonia.Media;
 using Avalonia.Media.TextFormatting;
 using Avalonia.Platform;
+using Avalonia.Platform.Surfaces;
 using GlyphRun = Avalonia.Media.GlyphRun;
 using Vortice.Direct3D11;
 using Vortice.Direct2D1;
-using Vortice.DirectWrite;
 using Vortice.WIC;
 using Vortice.DXGI;
 using PixelFormat = Avalonia.Platform.PixelFormat;
@@ -47,9 +47,6 @@ namespace Avalonia.Direct2D1
         public static ID2D1Factory1 Direct2D1Factory { get; private set; } = null!;
 
         public static ID2D1Device Direct2D1Device { get; private set; } = null!;
-
-        public static IDWriteFactory1 DirectWriteFactory { get; private set; } = null!;
-
         public static IWICImagingFactory ImagingFactory { get; private set; } = null!;
 
         public static IDXGIDevice1 DxgiDevice { get; private set; } = null!;
@@ -59,6 +56,8 @@ namespace Avalonia.Direct2D1
 
         internal static void InitializeDirect2D()
         {
+            SharpGenRuntimeInitializer.Initialize();
+
             lock (s_initLock)
             {
                 if (s_initialized)
@@ -86,9 +85,6 @@ namespace Avalonia.Direct2D1
                         Vortice.Direct2D1.FactoryType.MultiThreaded,
                         debugLevel: DebugLevel.None);
                 }
-
-                DirectWriteFactory = DWrite.DWriteCreateFactory<IDWriteFactory1>();
-
                 ImagingFactory = new IWICImagingFactory();
 
                 var featureLevels = new[]
@@ -120,19 +116,17 @@ namespace Avalonia.Direct2D1
             if (!OperatingSystem.IsWindows())
                 throw new PlatformNotSupportedException("Avalonia.Direct2D1 is only supported on Windows.");
 
-            SharpGen.Runtime.Configuration.EnableReleaseOnFinalizer = true;
             InitializeDirect2D();
+            DirectWritePlatform.InitializeFontManager();
             AvaloniaLocator.CurrentMutable
-                .Bind<IPlatformRenderInterface>().ToConstant(s_instance)
-                .Bind<IFontManagerImpl>().ToConstant(new FontManagerImpl())
-                .Bind<ITextShaperImpl>().ToConstant(new TextShaperImpl());
+                .Bind<IPlatformRenderInterface>().ToConstant(s_instance);
         }
 
-        private IRenderTarget CreateRenderTarget(IEnumerable<object> surfaces)
+        private IRenderTarget CreateRenderTarget(IEnumerable<IPlatformRenderSurface> surfaces)
         {
             foreach (var s in surfaces)
             {
-                if (s is IPlatformHandle nativeWindow)
+                if (s is INativePlatformHandleSurface nativeWindow)
                 {
                     if (nativeWindow.HandleDescriptor != "HWND")
                     {
@@ -171,7 +165,7 @@ namespace Avalonia.Direct2D1
         public IStreamGeometryImpl CreateStreamGeometry() => new StreamGeometryImpl();
         public IGeometryImpl CreateGeometryGroup(FillRule fillRule, IReadOnlyList<IGeometryImpl> children) => new GeometryGroupImpl(fillRule, children);
         public IGeometryImpl CreateCombinedGeometry(GeometryCombineMode combineMode, IGeometryImpl g1, IGeometryImpl g2) => new CombinedGeometryImpl(combineMode, g1, g2);
-        public IGlyphRunImpl CreateGlyphRun(IGlyphTypeface glyphTypeface, double fontRenderingEmSize, IReadOnlyList<GlyphInfo> glyphInfos, Point baselineOrigin)
+        public IGlyphRunImpl CreateGlyphRun(GlyphTypeface glyphTypeface, double fontRenderingEmSize, IReadOnlyList<GlyphInfo> glyphInfos, Point baselineOrigin)
         {
             return new GlyphRunImpl(glyphTypeface, fontRenderingEmSize, glyphInfos, baselineOrigin);
         }
@@ -186,9 +180,9 @@ namespace Avalonia.Direct2D1
             }
             public object? TryGetFeature(Type featureType) => null;
 
-            public IDrawingContextLayerImpl CreateOffscreenRenderTarget(PixelSize pixelSize, double scaling)
+            public IDrawingContextLayerImpl CreateOffscreenRenderTarget(PixelSize pixelSize, Vector scaling, bool enableTextAntialiasing)
             {
-                var dpi = new Vector(scaling * 96.0, scaling * 96.0);
+                var dpi = scaling * 96.0;
                 return new WicRenderTargetBitmapImpl(pixelSize, dpi);
             }
 
@@ -196,9 +190,10 @@ namespace Avalonia.Direct2D1
             {
             }
 
-            public IRenderTarget CreateRenderTarget(IEnumerable<object> surfaces) => _platform.CreateRenderTarget(surfaces);
+            public IRenderTarget CreateRenderTarget(IEnumerable<IPlatformRenderSurface> surfaces) => _platform.CreateRenderTarget(surfaces);
             public bool IsLost => false;
             public IReadOnlyDictionary<Type, object> PublicFeatures { get; } = new Dictionary<Type, object>();
+            public PixelSize? MaxOffscreenRenderTargetPixelSize => null;
         }
 
         public IPlatformRenderInterfaceContext CreateBackendContext(IPlatformGraphicsContext? graphicsContext) =>
@@ -206,7 +201,7 @@ namespace Avalonia.Direct2D1
 
         public IGeometryImpl BuildGlyphRunGeometry(GlyphRun glyphRun)
         {
-            if (glyphRun.GlyphTypeface is not GlyphTypefaceImpl glyphTypeface)
+            if (glyphRun.GlyphTypeface.PlatformTypeface is not DirectWriteGlyphTypeface glyphTypeface)
             {
                 throw new InvalidOperationException("PlatformImpl can't be null.");
             }

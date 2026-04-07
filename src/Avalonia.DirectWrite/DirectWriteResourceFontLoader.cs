@@ -4,21 +4,21 @@ using SharpGen.Runtime;
 using Vortice;
 using Vortice.DirectWrite;
 
-namespace Avalonia.Direct2D1.Media
+namespace Avalonia.DirectWrite
 {
 
-    internal class DWriteResourceFontLoader : CallbackBase, IDWriteFontCollectionLoader, IDWriteFontFileLoader
+    internal class DirectWriteResourceFontLoader : CallbackBase, IDWriteFontCollectionLoader, IDWriteFontFileLoader
     {
         private readonly List<DataStream> _fontStreams = new List<DataStream>();
         private readonly DataStream _keyStream;
         private static readonly HashSet<object> s_instances = new HashSet<object>();
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="DWriteResourceFontLoader"/> class.
+        /// Initializes a new instance of the <see cref="DirectWriteResourceFontLoader"/> class.
         /// </summary>
         /// <param name="factory">The factory.</param>
         /// <param name="fontAssets"></param>
-        public DWriteResourceFontLoader(IDWriteFactory factory, Stream[] fontAssets)
+        public DirectWriteResourceFontLoader(IDWriteFactory factory, Stream[] fontAssets)
         {
             s_instances.Add(this);
             var factory1 = factory;
@@ -68,7 +68,7 @@ namespace Avalonia.Direct2D1.Media
         /// <unmanaged>HRESULT IDWriteFontCollectionLoader::CreateEnumeratorFromKey([None] IDWriteFactory* factory,[In, Buffer] const void* collectionKey,[None] int collectionKeySize,[Out] IDWriteFontFileEnumerator** fontFileEnumerator)</unmanaged>
         IDWriteFontFileEnumerator IDWriteFontCollectionLoader.CreateEnumeratorFromKey(IDWriteFactory factory, nint collectionKey, uint collectionKeySize)
         {
-            return new DWriteResourceFontFileEnumerator(factory, this, collectionKey, (long)collectionKeySize);
+            return new DirectWriteResourceFontFileEnumerator(factory, this, collectionKey, (long)collectionKeySize);
         }
 
         /// <summary>
@@ -86,7 +86,7 @@ namespace Avalonia.Direct2D1.Media
         IDWriteFontFileStream IDWriteFontFileLoader.CreateStreamFromKey(nint fontFileReferenceKey, uint fontFileReferenceKeySize)
         {
             var index = MemoryHelpers.Read<int>(fontFileReferenceKey);
-            return new DWriteResourceFontFileStream(_fontStreams[index]);
+            return new DirectWriteResourceFontFileStream(_fontStreams[index]);
         }
 
         protected override void DisposeCore(bool disposing)

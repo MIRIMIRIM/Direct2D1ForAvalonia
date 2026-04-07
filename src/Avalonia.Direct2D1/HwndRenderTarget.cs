@@ -1,15 +1,15 @@
+using System;
+using System.Runtime.InteropServices;
 using Avalonia.Platform;
-using Avalonia.Win32;
-using Avalonia.Win32.Interop;
 using Vortice.DXGI;
 
 namespace Avalonia.Direct2D1
 {
-    class HwndRenderTarget : SwapChainRenderTarget
+    internal sealed class HwndRenderTarget : SwapChainRenderTarget
     {
-        private readonly IPlatformHandle _window;
+        private readonly INativePlatformHandleSurface _window;
 
-        public HwndRenderTarget(IPlatformHandle window)
+        public HwndRenderTarget(INativePlatformHandleSurface window)
         {
             _window = window;
         }
@@ -21,22 +21,15 @@ namespace Avalonia.Direct2D1
 
         protected override Vortice.Mathematics.Size GetWindowDpi()
         {
-            if (UnmanagedMethods.ShCoreAvailable && Win32Platform.WindowsVersion > PlatformConstants.Windows8)
+            try
             {
-                uint dpix, dpiy;
-
-                var monitor = UnmanagedMethods.MonitorFromWindow(
-                    _window.Handle,
-                    UnmanagedMethods.MONITOR.MONITOR_DEFAULTTONEAREST);
-
-                if (UnmanagedMethods.GetDpiForMonitor(
-                        monitor,
-                        UnmanagedMethods.MONITOR_DPI_TYPE.MDT_EFFECTIVE_DPI,
-                        out dpix,
-                        out dpiy) == 0)
-                {
-                    return new Vortice.Mathematics.Size(dpix, dpiy);
-                }
+                var dpi = GetDpiForWindow(_window.Handle);
+                if (dpi != 0)
+                    return new Vortice.Mathematics.Size(dpi, dpi);
+            }
+            catch (EntryPointNotFoundException)
+            {
+                // Older Windows versions fall back to 96 DPI below.
             }
 
             return new Vortice.Mathematics.Size(96, 96);
@@ -44,9 +37,23 @@ namespace Avalonia.Direct2D1
 
         protected override Vortice.Mathematics.SizeI GetWindowSize()
         {
-            UnmanagedMethods.RECT rc;
-            UnmanagedMethods.GetClientRect(_window.Handle, out rc);
-            return new Vortice.Mathematics.SizeI(rc.right - rc.left, rc.bottom - rc.top);
+            GetClientRect(_window.Handle, out var rect);
+            return new Vortice.Mathematics.SizeI(rect.Right - rect.Left, rect.Bottom - rect.Top);
+        }
+
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
         }
     }
 }

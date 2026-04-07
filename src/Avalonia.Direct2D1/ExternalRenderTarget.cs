@@ -20,7 +20,7 @@ namespace Avalonia.Direct2D1
             _externalRenderTargetProvider.DestroyRenderTarget();
         }
 
-        public IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing)
+        internal IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing)
         {
             var target =  _externalRenderTargetProvider.GetOrCreateRenderTarget();
             _externalRenderTargetProvider.BeforeDrawing();
@@ -37,7 +37,16 @@ namespace Avalonia.Direct2D1
             });
         }
 
-        public bool IsCorrupted => false;
+        public RenderTargetProperties Properties => new()
+        {
+            IsSuitableForDirectRendering = true
+        };
+
+        public IDrawingContextImpl CreateDrawingContext(IRenderTarget.RenderTargetSceneInfo sceneInfo, out RenderTargetDrawingContextProperties properties)
+        {
+            properties = default;
+            return CreateDrawingContext(useScaledDrawing: false);
+        }
 
         public IDrawingContextLayerImpl CreateLayer(Size size)
         {

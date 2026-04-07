@@ -9,19 +9,21 @@ using FontStretch = Vortice.DirectWrite.FontStretch;
 using Avalonia.Platform;
 using System.Linq;
 using System;
+using System.Runtime.Versioning;
 
-namespace Avalonia.Direct2D1.Media
+namespace Avalonia.DirectWrite
 {
-    internal static class Direct2D1FontCollectionCache
+    [SupportedOSPlatform("windows")]
+    internal static class DirectWriteFontCollectionCache
     {
         private static readonly ConcurrentDictionary<FontFamilyKey, IDWriteFontCollection> s_cachedCollections;
         internal static readonly IDWriteFontCollection InstalledFontCollection;
 
-        static Direct2D1FontCollectionCache()
+        static DirectWriteFontCollectionCache()
         {
             s_cachedCollections = new ConcurrentDictionary<FontFamilyKey, IDWriteFontCollection>();
 
-            InstalledFontCollection = Direct2D1Platform.DirectWriteFactory.GetSystemFontCollection(false);
+            InstalledFontCollection = DirectWritePlatform.DirectWriteFactory.GetSystemFontCollection(false);
         }
 
         public static IDWriteFont GetFont(Typeface typeface)
@@ -64,9 +66,9 @@ namespace Avalonia.Direct2D1.Media
 
             var fontAssets = assets.Select(x => assetLoader.Open(x)).ToArray();
 
-            var fontLoader = new DWriteResourceFontLoader(Direct2D1Platform.DirectWriteFactory, fontAssets);
+            var fontLoader = new DirectWriteResourceFontLoader(DirectWritePlatform.DirectWriteFactory, fontAssets);
 
-            return Direct2D1Platform.DirectWriteFactory.CreateCustomFontCollection(fontLoader, fontLoader.Key.PositionPointer, (uint)fontLoader.Key.RemainingLength);
+            return DirectWritePlatform.DirectWriteFactory.CreateCustomFontCollection(fontLoader, fontLoader.Key.PositionPointer, (uint)fontLoader.Key.RemainingLength);
         }
     }
 }

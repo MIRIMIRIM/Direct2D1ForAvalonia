@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using Avalonia;
+using Avalonia.DirectWrite;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Media.TextFormatting;
@@ -62,6 +63,7 @@ if (needsAvaloniaInit)
     AppBuilder.Configure<BenchmarkApp>()
         .UsePlatformDetect()
         .UseDirect2D1()
+        .UseDirectWrite()
         .SetupWithoutStarting();
 }
 
@@ -133,15 +135,15 @@ static void TryStabilizeProcessScheduling()
 BenchmarkResult RunTextShaperCase(int textLength, int iterations, int repeats)
 {
     var fontPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Fonts", "segoeui.ttf");
-    using var stream = File.OpenRead(fontPath);
+using var stream = File.OpenRead(fontPath);
 
-    var fontManagerIface = typeof(Avalonia.Direct2D1.Media.FontManagerImpl).GetInterfaces().First(i => i.Name == "IFontManagerImpl");
-    var fontManager = (Avalonia.Direct2D1.Media.FontManagerImpl)(GetService(fontManagerIface) ?? throw new InvalidOperationException("Service not found"));
-    if (!fontManager.TryCreateGlyphTypeface(stream, FontSimulations.None, out var glyphTypeface))
+    var fontManager = new FontManagerImpl();
+    if (!fontManager.TryCreateGlyphTypeface(stream, FontSimulations.None, out var platformTypeface))
         throw new InvalidOperationException("Failed to create glyph typeface.");
+    using var platformTypefaceLease = platformTypeface;
+    var glyphTypeface = new GlyphTypeface(platformTypefaceLease);
 
-    var shaperIface = typeof(Avalonia.Direct2D1.Media.TextShaperImpl).GetInterfaces().First(i => i.Name == "ITextShaperImpl");
-    var shaper = (Avalonia.Direct2D1.Media.TextShaperImpl)(GetService(shaperIface) ?? throw new InvalidOperationException("Service not found"));
+    var shaper = new DirectWriteTextShaper();
     var text = BuildText(textLength);
     var options = new TextShaperOptions(glyphTypeface, 24, 0, CultureInfo.InvariantCulture, 0, 0);
 
@@ -161,33 +163,6 @@ BenchmarkResult RunTextShaperCase(int textLength, int iterations, int repeats)
         charsPerSecond,
         "chars/s",
         allocatedBytes);
-}
-
-static T GetRequiredService<T>() where T : class
-{
-    var service = GetService(typeof(T)) as T;
-    return service ?? throw new InvalidOperationException($"Service not found: {typeof(T).FullName}");
-}
-
-static object? GetService(Type serviceType)
-{
-    if (serviceType is null)
-        throw new ArgumentNullException(nameof(serviceType));
-
-    var locatorType = typeof(AvaloniaLocator);
-
-    var currentProperty = locatorType.GetProperty("Current", BindingFlags.Public | BindingFlags.Static)
-        ?? locatorType.GetProperty("CurrentMutable", BindingFlags.Public | BindingFlags.Static);
-
-    var resolver = currentProperty?.GetValue(null);
-    if (resolver is null)
-        return null;
-
-    var getService = resolver.GetType().GetMethod("GetService", new[] { typeof(Type) });
-    if (getService is null)
-        throw new MissingMethodException(resolver.GetType().FullName, "GetService(Type)");
-
-    return getService.Invoke(resolver, new object?[] { serviceType });
 }
 
 static BenchmarkResult RunTileBrushCase(int iterations, int repeats)
@@ -225,50 +200,6 @@ static BenchmarkResult RunTileBrushCase(int iterations, int repeats)
         opsPerSecond,
         "ops/s",
         allocatedBytes);
-}
-
-static BenchmarkResult RunFramebufferCopyCase(string name, int height, int srcStride, int dstStride, int iterations)
-{
-    var srcSize = srcStride * height;
-    var dstSize = dstStride * height;
-    var rowBytes = Math.Min(srcStride, dstStride);
-
-    var src = Marshal.AllocHGlobal(srcSize);
-    var dst = Marshal.AllocHGlobal(dstSize);
-    try
-    {
-        unsafe
-        {
-            new Span<byte>((void*)src, srcSize).Fill(0x5A);
-            new Span<byte>((void*)dst, dstSize).Clear();
-        }
-
-        CopyRows(src, dst, height, srcStride, dstStride); // warmup
-
-        var (elapsedMs, gbPerSecond, allocatedBytes) = MeasureCase(
-            iterations,
-            5,
-            elapsedSeconds =>
-            {
-                var totalBytes = (double)rowBytes * height * iterations;
-                return totalBytes / elapsedSeconds / 1_000_000_000.0;
-            },
-            () => CopyRows(src, dst, height, srcStride, dstStride),
-            selectBest: true);
-
-        return new BenchmarkResult(
-            name,
-            iterations,
-            elapsedMs,
-            gbPerSecond,
-            "GB/s",
-            allocatedBytes);
-    }
-    finally
-    {
-        Marshal.FreeHGlobal(src);
-        Marshal.FreeHGlobal(dst);
-    }
 }
 
 static unsafe void CopyRows(IntPtr srcPtr, IntPtr dstPtr, int height, int srcStride, int dstStride)

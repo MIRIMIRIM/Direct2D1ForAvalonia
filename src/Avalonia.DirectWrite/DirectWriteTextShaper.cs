@@ -3,16 +3,19 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using Avalonia.Media;
+using Avalonia.Media.Fonts;
 using Avalonia.Media.TextFormatting;
 using Avalonia.Platform;
 using SharpGen.Runtime;
 using Vortice.DirectWrite;
 using AvaloniaFontFeature = Avalonia.Media.FontFeature;
 
-namespace Avalonia.Direct2D1.Media
+namespace Avalonia.DirectWrite
 {
-    internal sealed class TextShaperImpl : ITextShaperImpl
+    [SupportedOSPlatform("windows")]
+    internal sealed class DirectWriteTextShaper : ITextShaperImpl
     {
         private static readonly object s_gate = new();
         private static IDWriteTextAnalyzer? s_analyzer;
@@ -29,7 +32,7 @@ namespace Avalonia.Direct2D1.Media
                     if (s_analyzer is not null)
                         return s_analyzer;
 
-                    s_analyzer = Direct2D1Platform.DirectWriteFactory.CreateTextAnalyzer();
+                    s_analyzer = DirectWritePlatform.DirectWriteFactory.CreateTextAnalyzer();
                     return s_analyzer;
                 }
             }
@@ -37,17 +40,19 @@ namespace Avalonia.Direct2D1.Media
 
         public ShapedBuffer ShapeText(ReadOnlyMemory<char> text, TextShaperOptions options)
         {
-            if (options.Typeface is GlyphTypefaceImpl dw)
+            if (options.GlyphTypeface.PlatformTypeface is DirectWriteGlyphTypeface dw)
                 return ShapeWithDirectWrite(text, options, dw);
 
             return ShapeSimple(text, options);
         }
 
-        private static ShapedBuffer ShapeWithDirectWrite(ReadOnlyMemory<char> text, TextShaperOptions options, GlyphTypefaceImpl typeface)
+        public ITextShaperTypeface CreateTypeface(GlyphTypeface glyphTypeface) => new DirectWriteTextShaperTypeface();
+
+        private static ShapedBuffer ShapeWithDirectWrite(ReadOnlyMemory<char> text, TextShaperOptions options, DirectWriteGlyphTypeface typeface)
         {
             var span = text.Span;
             if (span.Length == 0)
-                return new ShapedBuffer(text, 0, options.Typeface, options.FontRenderingEmSize, options.BidiLevel);
+                return new ShapedBuffer(text, 0, options.GlyphTypeface, options.FontRenderingEmSize, options.BidiLevel);
 
             var textString = TryGetString(text) ?? span.ToString();
             var culture = options.Culture ?? CultureInfo.CurrentCulture;
@@ -56,7 +61,7 @@ namespace Avalonia.Direct2D1.Media
             var analyzer = Analyzer;
             var runs = AnalyzeRuns(textString, locale, options.BidiLevel);
             if (runs.Count == 0)
-                return new ShapedBuffer(text, 0, options.Typeface, options.FontRenderingEmSize, options.BidiLevel);
+                return new ShapedBuffer(text, 0, options.GlyphTypeface, options.FontRenderingEmSize, options.BidiLevel);
 
             var hasFeatures = options.FontFeatures is { Count: > 0 };
 
@@ -77,7 +82,7 @@ namespace Avalonia.Direct2D1.Media
             string textString,
             ReadOnlySpan<char> span,
             TextShaperOptions options,
-            GlyphTypefaceImpl typeface,
+            DirectWriteGlyphTypeface typeface,
             ShapingRun run,
             string locale,
             IDWriteTextAnalyzer analyzer)
@@ -178,7 +183,7 @@ namespace Avalonia.Direct2D1.Media
             float[] advancesArr,
             GlyphOffset[] offsetsArr)
         {
-            var typeface = options.Typeface;
+            var typeface = options.GlyphTypeface;
             var length = checked((int)glyphCount);
             var shaped = new ShapedBuffer(text, length, typeface, options.FontRenderingEmSize, options.BidiLevel);
 
@@ -223,10 +228,10 @@ namespace Avalonia.Direct2D1.Media
 
                     if (cluster >= 0 && cluster < span.Length && span[cluster] == '\t')
                     {
-                        glyphId = (ushort)typeface.GetGlyph(' ');
+                        glyphId = GetSpaceGlyph(typeface);
                         advance = options.IncrementalTabWidth > 0
                             ? (float)options.IncrementalTabWidth
-                            : (float)(4 * typeface.GetGlyphAdvance(glyphId) * (options.FontRenderingEmSize / typeface.Metrics.DesignEmHeight));
+                            : (float)(4 * GetGlyphAdvance(typeface, glyphId) * (options.FontRenderingEmSize / typeface.Metrics.DesignEmHeight));
                         dx = 0;
                         dy = 0;
                     }
@@ -251,7 +256,7 @@ namespace Avalonia.Direct2D1.Media
             string textString,
             ReadOnlySpan<char> span,
             TextShaperOptions options,
-            GlyphTypefaceImpl typeface,
+            DirectWriteGlyphTypeface typeface,
             List<ShapingRun> runs,
             string locale,
             IDWriteTextAnalyzer analyzer)
@@ -380,12 +385,12 @@ namespace Avalonia.Direct2D1.Media
                             offsetsArr,
                             glyphClustersArr,
                             options,
-                            typeface,
+                            options.GlyphTypeface,
                             glyphs);
                     }
                 }
 
-                var shaped = new ShapedBuffer(text, glyphs.Count, options.Typeface, options.FontRenderingEmSize, options.BidiLevel);
+                var shaped = new ShapedBuffer(text, glyphs.Count, options.GlyphTypeface, options.FontRenderingEmSize, options.BidiLevel);
                 for (var i = 0; i < glyphs.Count; i++)
                     shaped[i] = glyphs[i];
 
@@ -435,7 +440,7 @@ namespace Avalonia.Direct2D1.Media
             GlyphOffset[] offsetsArr,
             int[] glyphClustersArr,
             TextShaperOptions options,
-            IGlyphTypeface typeface,
+            GlyphTypeface typeface,
             List<GlyphInfo> output)
         {
             var length = checked((int)glyphCount);
@@ -477,10 +482,10 @@ namespace Avalonia.Direct2D1.Media
 
                 if (localCluster >= 0 && localCluster < runText.Length && runText[localCluster] == '\t')
                 {
-                    glyphId = (ushort)typeface.GetGlyph(' ');
+                    glyphId = GetSpaceGlyph(typeface);
                     advance = options.IncrementalTabWidth > 0
                         ? (float)options.IncrementalTabWidth
-                        : (float)(4 * typeface.GetGlyphAdvance(glyphId) * (options.FontRenderingEmSize / typeface.Metrics.DesignEmHeight));
+                        : (float)(4 * GetGlyphAdvance(typeface, glyphId) * (options.FontRenderingEmSize / typeface.Metrics.DesignEmHeight));
                     dx = 0;
                     dy = 0;
                 }
@@ -628,7 +633,7 @@ namespace Avalonia.Direct2D1.Media
 
         private static ShapedBuffer ShapeSimple(ReadOnlyMemory<char> text, TextShaperOptions options)
         {
-            var typeface = options.Typeface;
+            var typeface = options.GlyphTypeface;
             var span = text.Span;
 
             var glyphCount = CountScalars(span);
@@ -658,16 +663,16 @@ namespace Avalonia.Direct2D1.Media
 
                 i += consumed;
 
-                var glyphId = (ushort)typeface.GetGlyph((uint)codepoint);
+                var glyphId = GetGlyph(typeface, codepoint);
                 var offset = default(Vector);
-                var advance = typeface.GetGlyphAdvance(glyphId) * scale + options.LetterSpacing;
+                var advance = GetGlyphAdvance(typeface, glyphId) * scale + options.LetterSpacing;
 
                 if (codepoint == '\t')
                 {
-                    glyphId = (ushort)typeface.GetGlyph(' ');
+                    glyphId = GetSpaceGlyph(typeface);
                     advance = options.IncrementalTabWidth > 0
                         ? options.IncrementalTabWidth
-                        : 4 * typeface.GetGlyphAdvance(glyphId) * scale;
+                        : 4 * GetGlyphAdvance(typeface, glyphId) * scale;
                     offset = default;
                 }
 
@@ -699,6 +704,18 @@ namespace Avalonia.Direct2D1.Media
             }
 
             return count;
+        }
+
+        private static ushort GetGlyph(GlyphTypeface typeface, int codepoint)
+        {
+            return typeface.CharacterToGlyphMap[codepoint];
+        }
+
+        private static ushort GetSpaceGlyph(GlyphTypeface typeface) => GetGlyph(typeface, ' ');
+
+        private static ushort GetGlyphAdvance(GlyphTypeface typeface, ushort glyphId)
+        {
+            return typeface.TryGetHorizontalGlyphAdvance(glyphId, out var advance) ? advance : (ushort)0;
         }
 
         private readonly record struct ScriptRun(int Start, int Length, ScriptAnalysis ScriptAnalysis)
@@ -917,6 +934,13 @@ namespace Avalonia.Direct2D1.Media
                 }
 
                 return pointer;
+            }
+        }
+
+        private sealed class DirectWriteTextShaperTypeface : ITextShaperTypeface
+        {
+            public void Dispose()
+            {
             }
         }
 

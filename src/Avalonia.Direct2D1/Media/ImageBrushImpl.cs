@@ -1,5 +1,4 @@
 using Avalonia.Media;
-using Avalonia.Rendering.Utilities;
 using Vortice.Direct2D1;
 
 namespace Avalonia.Direct2D1.Media

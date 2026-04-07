@@ -4,15 +4,15 @@ using SharpGen.Runtime;
 using Vortice;
 using Vortice.DirectWrite;
 
-namespace Avalonia.Direct2D1.Media
+namespace Avalonia.DirectWrite
 {
     /// <summary>
     /// Resource FontFileEnumerator.
     /// </summary>
     /// <remarks>
-    /// Initializes a new instance of the <see cref="DWriteResourceFontFileEnumerator"/> class.
+    /// Initializes a new instance of the <see cref="DirectWriteResourceFontFileEnumerator"/> class.
     /// </remarks>
-    internal class DWriteResourceFontFileEnumerator : CallbackBase, IDWriteFontFileEnumerator
+    internal class DirectWriteResourceFontFileEnumerator : CallbackBase, IDWriteFontFileEnumerator
     {
         private readonly IDWriteFactory _factory;
         private readonly IDWriteFontFileLoader _loader;
@@ -24,7 +24,7 @@ namespace Avalonia.Direct2D1.Media
         /// <param name="loader">The loader.</param>
         /// <param name="buffer">The key buffer.</param>
         /// <param name="size">The key size.</param>
-        public DWriteResourceFontFileEnumerator(IDWriteFactory factory, IDWriteFontFileLoader loader, nint buffer, long size)
+        public DirectWriteResourceFontFileEnumerator(IDWriteFactory factory, IDWriteFontFileLoader loader, nint buffer, long size)
         {
             s_instances.Add(this);
             _factory = factory;

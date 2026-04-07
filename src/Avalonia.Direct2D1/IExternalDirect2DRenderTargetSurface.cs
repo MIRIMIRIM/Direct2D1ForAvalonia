@@ -1,8 +1,9 @@
-﻿using Vortice.Direct2D1;
+using Avalonia.Platform.Surfaces;
+using Vortice.Direct2D1;
 
 namespace Avalonia.Direct2D1
 {
-    public interface IExternalDirect2DRenderTargetSurface
+    public interface IExternalDirect2DRenderTargetSurface : IPlatformRenderSurface
     {
         ID2D1RenderTarget GetOrCreateRenderTarget();
         void DestroyRenderTarget();

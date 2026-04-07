@@ -22,6 +22,8 @@ namespace Avalonia.Direct2D1.Media.Imaging
             return new D2DRenderTargetBitmapImpl(bitmapRenderTarget);
         }
 
+        public IDrawingContextImpl CreateDrawingContext() => CreateDrawingContext(useScaledDrawing: false);
+
         public IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing)
         {
             return new DrawingContextImpl( this, _renderTarget, useScaledDrawing, 

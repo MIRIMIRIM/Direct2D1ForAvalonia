@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="Avalonia.Direct2D1/Avalonia.Direct2D1.csproj" />
+  <Project Path="Avalonia.DirectWrite/Avalonia.DirectWrite.csproj" />
   <Folder Name="/samples/">
     <Project Path="AotSmoke/AotSmoke.csproj" />
   </Folder>

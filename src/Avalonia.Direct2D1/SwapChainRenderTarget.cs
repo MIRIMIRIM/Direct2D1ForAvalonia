@@ -18,7 +18,7 @@ namespace Avalonia.Direct2D1
         /// Creates a drawing context for a rendering session.
         /// </summary>
         /// <returns>An <see cref="Avalonia.Platform.IDrawingContextImpl"/>.</returns>
-        public IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing)
+        internal IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing)
         {
             var size = GetWindowSize();
             var dpi = GetWindowDpi();
@@ -35,7 +35,16 @@ namespace Avalonia.Direct2D1
             return new DrawingContextImpl(this, deviceContext, useScaledDrawing, _swapChain);
         }
 
-        public bool IsCorrupted => false;
+        public Avalonia.Platform.RenderTargetProperties Properties => new()
+        {
+            IsSuitableForDirectRendering = true
+        };
+
+        public IDrawingContextImpl CreateDrawingContext(IRenderTarget.RenderTargetSceneInfo sceneInfo, out RenderTargetDrawingContextProperties properties)
+        {
+            properties = default;
+            return CreateDrawingContext(useScaledDrawing: false);
+        }
 
         public IDrawingContextLayerImpl CreateLayer(Size size)
         {
@@ -51,7 +60,6 @@ namespace Avalonia.Direct2D1
         public void Dispose()
         {
             _deviceContext?.Dispose();
-
             _swapChain?.Dispose();
         }
 

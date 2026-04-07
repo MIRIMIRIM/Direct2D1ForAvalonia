@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using Avalonia.DirectWrite;
 using Avalonia.Media;
 using Avalonia.Media.TextFormatting;
 using Avalonia.Platform;
@@ -11,7 +12,8 @@ namespace Avalonia.Direct2D1.Media
 {
     internal class GlyphRunImpl : IGlyphRunImpl
     {
-        private readonly GlyphTypefaceImpl _glyphTypefaceImpl;
+        private readonly GlyphTypeface _glyphTypeface;
+        private readonly DirectWriteGlyphTypeface _glyphTypefaceImpl;
 
         private readonly ushort[] _glyphIndices;
         private readonly float[] _glyphAdvances;
@@ -19,10 +21,11 @@ namespace Avalonia.Direct2D1.Media
 
         private Vortice.DirectWrite.GlyphRun? _glyphRun;
 
-        public GlyphRunImpl(IGlyphTypeface glyphTypeface, double fontRenderingEmSize,
+        public GlyphRunImpl(GlyphTypeface glyphTypeface, double fontRenderingEmSize,
             IReadOnlyList<GlyphInfo> glyphInfos, Point baselineOrigin)
         {
-            _glyphTypefaceImpl = (GlyphTypefaceImpl)glyphTypeface;
+            _glyphTypeface = glyphTypeface;
+            _glyphTypefaceImpl = (DirectWriteGlyphTypeface)glyphTypeface.PlatformTypeface;
 
             FontRenderingEmSize = fontRenderingEmSize;
             BaselineOrigin = baselineOrigin;
@@ -58,7 +61,7 @@ namespace Avalonia.Direct2D1.Media
                 _glyphOffsets[i] = new GlyphOffset
                 {
                     AdvanceOffset = (float)x,
-                    AscenderOffset = (float)y
+                    AscenderOffset = (float)-y
                 };
             }
 
@@ -91,7 +94,7 @@ namespace Avalonia.Direct2D1.Media
             }
         }
 
-        public IGlyphTypeface GlyphTypeface => _glyphTypefaceImpl;
+        public GlyphTypeface GlyphTypeface => _glyphTypeface;
 
         public double FontRenderingEmSize { get; }
 

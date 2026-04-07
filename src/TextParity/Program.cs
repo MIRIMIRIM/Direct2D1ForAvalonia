@@ -8,6 +8,7 @@ using System.Text.Json;
 using Avalonia;
 using Avalonia.Direct2D1;
 using Avalonia.Direct2D1.Media;
+using Avalonia.DirectWrite;
 using Avalonia.Media;
 using Avalonia.Media.TextFormatting;
 using Vortice.DirectWrite;
@@ -64,6 +65,7 @@ internal static class Program
 
         Console.WriteLine("Initializing Avalonia.Direct2D1 Platform...");
         Direct2D1Platform.InitializeDirect2D();
+        Avalonia.DirectWrite.DirectWritePlatform.InitializeDirectWrite();
 
         var toolRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", ".."));
         var outDir = options.OutDir ?? Path.Combine(toolRoot, "out");
@@ -184,7 +186,7 @@ internal static class Program
         using var hbFont = new HarfBuzzSharp.Font(face);
         using var stream = File.OpenRead(fontPath);
 
-        if (!fontManager.TryCreateGlyphTypeface(stream, Avalonia.Media.FontSimulations.None, out var glyphTypeface))
+        if (!fontManager.TryCreateGlyphTypeface(stream, Avalonia.Media.FontSimulations.None, out var platformTypeface))
         {
             return new CaseResult(
                 testCase.Name,
@@ -198,13 +200,15 @@ internal static class Program
                 DirectWriteGlyphs: Array.Empty<GlyphDump>(),
                 HarfBuzzGlyphs: Array.Empty<GlyphDump>());
         }
+        using var platformTypefaceLease = platformTypeface;
+        var glyphTypeface = new GlyphTypeface(platformTypefaceLease);
 
         var culture = new CultureInfo(cultureName);
         var shaperOptions = features.Count == 0
             ? new TextShaperOptions(glyphTypeface, 32.0, bidiLevel, culture, 0, 0)
-            : new TextShaperOptions(glyphTypeface, features, 32.0, bidiLevel, culture, 0, 0);
+            : new TextShaperOptions(glyphTypeface, 32.0, bidiLevel, culture, 0, 0, features);
 
-        var shaperDWrite = new TextShaperImpl();
+        var shaperDWrite = new DirectWriteTextShaper();
         var dwBuffer = shaperDWrite.ShapeText(testCase.Text.AsMemory(), shaperOptions);
         var hbBuffer = HarfBuzzShaper.ShapeText(testCase.Text.AsMemory(), hbFont, glyphTypeface, shaperOptions.FontRenderingEmSize, bidiLevel, culture, features);
 
@@ -268,7 +272,7 @@ internal static class Program
     private static (string? dwImage, string? hbImage, string? compareImage) RenderComparisonImages(
         string prefix,
         string outDir,
-        IGlyphTypeface glyphTypeface,
+        GlyphTypeface glyphTypeface,
         double fontRenderingEmSize,
         sbyte bidiLevel,
         IReadOnlyList<GlyphInfo> directWriteGlyphs,
@@ -358,7 +362,7 @@ internal static class Program
         int widthPx,
         int heightPx,
         Vector dpi,
-        IGlyphTypeface glyphTypeface,
+        GlyphTypeface glyphTypeface,
         double fontRenderingEmSize,
         IReadOnlyList<GlyphInfo> glyphs,
         double baselineX,
@@ -384,7 +388,7 @@ internal static class Program
         return sum;
     }
 
-    private static (double lineHeightDip, double baselineDip) ComputeLineMetricsDip(IGlyphTypeface glyphTypeface, double fontRenderingEmSize)
+    private static (double lineHeightDip, double baselineDip) ComputeLineMetricsDip(GlyphTypeface glyphTypeface, double fontRenderingEmSize)
     {
         var scale = fontRenderingEmSize / glyphTypeface.Metrics.DesignEmHeight;
         var baseline = -glyphTypeface.Metrics.Ascent * scale;
@@ -616,7 +620,7 @@ internal static class Program
 
     private static string? TryResolveFontPathByFamily(string familyName)
     {
-        var collection = Direct2D1FontCollectionCache.InstalledFontCollection;
+        var collection = DirectWriteFontCollectionCache.InstalledFontCollection;
         if (!collection.FindFamilyName(familyName, out var index))
             return null;
 
