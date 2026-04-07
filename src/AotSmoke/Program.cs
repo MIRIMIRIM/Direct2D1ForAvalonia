@@ -4,6 +4,7 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Controls;
+using MIR.Direct2D1ForAvalonia;
 
 if (!OperatingSystem.IsWindows())
     throw new PlatformNotSupportedException("AotSmoke targets Windows only.");

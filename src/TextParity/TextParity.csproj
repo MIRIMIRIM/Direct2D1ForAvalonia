@@ -18,7 +18,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Avalonia.Direct2D1\Avalonia.Direct2D1.csproj" />
+    <ProjectReference Include="..\Direct2D1ForAvalonia\MIR.Direct2D1ForAvalonia.csproj" />
   </ItemGroup>
 
 </Project>

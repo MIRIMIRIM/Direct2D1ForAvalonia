@@ -6,9 +6,9 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using Avalonia;
-using Avalonia.Direct2D1;
-using Avalonia.Direct2D1.Media;
-using Avalonia.DirectWrite;
+using MIR.Direct2D1ForAvalonia;
+using MIR.Direct2D1ForAvalonia.Media;
+using MIR.DirectWriteForAvalonia;
 using Avalonia.Media;
 using Avalonia.Media.TextFormatting;
 using Vortice.DirectWrite;
@@ -63,9 +63,9 @@ internal static class Program
             return 2;
         }
 
-        Console.WriteLine("Initializing Avalonia.Direct2D1 Platform...");
+        Console.WriteLine("Initializing MIR.Direct2D1ForAvalonia Platform...");
         Direct2D1Platform.InitializeDirect2D();
-        Avalonia.DirectWrite.DirectWritePlatform.InitializeDirectWrite();
+        MIR.DirectWriteForAvalonia.DirectWritePlatform.InitializeDirectWrite();
 
         var toolRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", ".."));
         var outDir = options.OutDir ?? Path.Combine(toolRoot, "out");

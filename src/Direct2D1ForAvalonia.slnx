@@ -1,0 +1,11 @@
+<Solution>
+  <Project Path="Direct2D1ForAvalonia/MIR.Direct2D1ForAvalonia.csproj" />
+  <Project Path="DirectWriteForAvalonia/MIR.DirectWriteForAvalonia.csproj" />
+  <Folder Name="/samples/">
+    <Project Path="AotSmoke/AotSmoke.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="Benchmarks/Benchmarks.csproj" />
+    <Project Path="TextParity/TextParity.csproj" />
+  </Folder>
+</Solution>

@@ -11,7 +11,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Avalonia.Direct2D1\Avalonia.Direct2D1.csproj" />
+    <ProjectReference Include="..\Direct2D1ForAvalonia\MIR.Direct2D1ForAvalonia.csproj" />
     <PackageReference Include="Avalonia.Desktop" Version="12.0.0" />
   </ItemGroup>
 </Project>
