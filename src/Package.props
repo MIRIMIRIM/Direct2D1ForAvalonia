@@ -1,0 +1,27 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>12.0.0</Version>
+    <Authors>MIRIMIRIM</Authors>
+    <Copyright>Copyright (c) 2026 MIRIMIRIM. Portions Copyright (c) AvaloniaUI OÜ.</Copyright>
+    <RepositoryUrl>https://github.com/MIRIMIRIM/Direct2D1ForAvalonia</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/MIRIMIRIM/Direct2D1ForAvalonia</PackageProjectUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <SignAssembly>true</SignAssembly>
+    <PublicSign>true</PublicSign>
+    <AssemblyOriginatorKeyFile>..\Avalonia.PublicKey.snk</AssemblyOriginatorKeyFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Link="README.md" />
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" Link="LICENSE" />
+    <None Include="..\..\THIRD_PARTY_NOTICES.md" Pack="true" PackagePath="\" Link="THIRD_PARTY_NOTICES.md" />
+  </ItemGroup>
+</Project>
