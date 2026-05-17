@@ -11,6 +11,7 @@ using Avalonia.Media;
 using Avalonia.Media.TextFormatting;
 using Avalonia.Platform;
 using Avalonia.Platform.Surfaces;
+using Avalonia.Win32.DirectX;
 using GlyphRun = Avalonia.Media.GlyphRun;
 using Vortice.Direct3D11;
 using Vortice.Direct2D1;
@@ -43,6 +44,8 @@ namespace MIR.Direct2D1ForAvalonia
         private static readonly Direct2D1Platform s_instance = new Direct2D1Platform();
 
         public static ID3D11Device Direct3D11Device { get; private set; } = null!;
+
+        public static ID3D11DeviceContext Direct3D11ImmediateContext { get; private set; } = null!;
 
         public static ID2D1Factory1 Direct2D1Factory { get; private set; } = null!;
 
@@ -103,6 +106,8 @@ namespace MIR.Direct2D1ForAvalonia
                     DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport,
                     featureLevels);
 
+                Direct3D11ImmediateContext = Direct3D11Device.ImmediateContext;
+
                 DxgiDevice = Direct3D11Device.QueryInterface<IDXGIDevice1>();
 
                 Direct2D1Device = Direct2D1Factory.CreateDevice(DxgiDevice);
@@ -122,30 +127,67 @@ namespace MIR.Direct2D1ForAvalonia
                 .Bind<IPlatformRenderInterface>().ToConstant(s_instance);
         }
 
-        private IRenderTarget CreateRenderTarget(IEnumerable<IPlatformRenderSurface> surfaces)
+        private IRenderTarget CreateRenderTarget(
+            IEnumerable<IPlatformRenderSurface> surfaces,
+            IPlatformGraphicsContext? graphicsContext)
         {
+            IDirect3D11TexturePlatformSurface? textureSurface = null;
+            IExternalDirect2DRenderTargetSurface? externalSurface = null;
+            INativePlatformHandleSurface? hwndSurface = null;
+            IFramebufferPlatformSurface? framebufferSurface = null;
+
             foreach (var s in surfaces)
             {
-                if (s is INativePlatformHandleSurface nativeWindow)
+                if (s is IDirect3D11TexturePlatformSurface texture)
                 {
-                    if (nativeWindow.HandleDescriptor != "HWND")
-                    {
-                        throw new NotSupportedException("Don't know how to create a Direct2D1 renderer from " +
-                                                        nativeWindow.HandleDescriptor);
-                    }
-
-                    return new HwndRenderTarget(nativeWindow);
+                    textureSurface = texture;
+                    continue;
                 }
+
                 if (s is IExternalDirect2DRenderTargetSurface external)
                 {
-                    return new ExternalRenderTarget(external);
+                    externalSurface = external;
+                    continue;
+                }
+
+                if (s is INativePlatformHandleSurface nativeWindow)
+                {
+                    if (nativeWindow.HandleDescriptor == "HWND")
+                    {
+                        hwndSurface = nativeWindow;
+                    }
+
+                    continue;
                 }
 
                 if (s is IFramebufferPlatformSurface fb)
                 {
-                    return new FramebufferShimRenderTarget(fb);
+                    framebufferSurface = fb;
                 }
             }
+
+            if (textureSurface != null)
+            {
+                return new D3D11TextureRenderTarget(
+                    textureSurface,
+                    graphicsContext ?? Direct2DGraphicsContext.Instance);
+            }
+
+            if (externalSurface != null)
+            {
+                return new ExternalRenderTarget(externalSurface);
+            }
+
+            if (hwndSurface != null)
+            {
+                return new HwndRenderTarget(hwndSurface);
+            }
+
+            if (framebufferSurface != null)
+            {
+                return new FramebufferShimRenderTarget(framebufferSurface);
+            }
+
             throw new NotSupportedException("Don't know how to create a Direct2D1 renderer from any of provided surfaces");
         }
 
@@ -173,10 +215,12 @@ namespace MIR.Direct2D1ForAvalonia
         class D2DApi : IPlatformRenderInterfaceContext
         {
             private readonly Direct2D1Platform _platform;
+            private readonly IPlatformGraphicsContext? _graphicsContext;
 
-            public D2DApi(Direct2D1Platform platform)
+            public D2DApi(Direct2D1Platform platform, IPlatformGraphicsContext? graphicsContext)
             {
                 _platform = platform;
+                _graphicsContext = graphicsContext;
             }
             public object? TryGetFeature(Type featureType) => null;
 
@@ -190,14 +234,15 @@ namespace MIR.Direct2D1ForAvalonia
             {
             }
 
-            public IRenderTarget CreateRenderTarget(IEnumerable<IPlatformRenderSurface> surfaces) => _platform.CreateRenderTarget(surfaces);
+            public IRenderTarget CreateRenderTarget(IEnumerable<IPlatformRenderSurface> surfaces) =>
+                _platform.CreateRenderTarget(surfaces, _graphicsContext);
             public bool IsLost => false;
             public IReadOnlyDictionary<Type, object> PublicFeatures { get; } = new Dictionary<Type, object>();
             public PixelSize? MaxOffscreenRenderTargetPixelSize => null;
         }
 
         public IPlatformRenderInterfaceContext CreateBackendContext(IPlatformGraphicsContext? graphicsContext) =>
-            new D2DApi(this);
+            new D2DApi(this, graphicsContext);
 
         public IGeometryImpl BuildGlyphRunGeometry(GlyphRun glyphRun)
         {
@@ -310,5 +355,37 @@ namespace MIR.Direct2D1ForAvalonia
 
         public bool SupportsRegions => false;
         public IPlatformRenderInterfaceRegion CreateRegion() => throw new NotSupportedException();
+
+        private sealed class Direct2DGraphicsContext : IPlatformGraphicsContext
+        {
+            public static readonly Direct2DGraphicsContext Instance = new();
+
+            private Direct2DGraphicsContext()
+            {
+            }
+
+            public bool IsLost => false;
+
+            public IDisposable EnsureCurrent() => Disposable.Empty;
+
+            public object? TryGetFeature(Type featureType) => null;
+
+            public void Dispose()
+            {
+            }
+        }
+
+        private sealed class Disposable : IDisposable
+        {
+            public static readonly Disposable Empty = new();
+
+            private Disposable()
+            {
+            }
+
+            public void Dispose()
+            {
+            }
+        }
     }
 }

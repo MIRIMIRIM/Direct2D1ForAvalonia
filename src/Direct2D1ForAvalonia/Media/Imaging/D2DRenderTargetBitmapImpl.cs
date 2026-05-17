@@ -5,7 +5,7 @@ using Vortice.Direct2D1;
 
 namespace MIR.Direct2D1ForAvalonia.Media.Imaging
 {
-    internal class D2DRenderTargetBitmapImpl(ID2D1BitmapRenderTarget renderTarget) : D2DBitmapImpl(renderTarget.Bitmap.QueryInterface<ID2D1Bitmap1>()), IDrawingContextLayerImpl, ILayerFactory
+    internal class D2DRenderTargetBitmapImpl(ID2D1BitmapRenderTarget renderTarget) : D2DBitmapImpl(GetBitmap(renderTarget)), IDrawingContextLayerImpl, ILayerFactory
     {
         private readonly ID2D1BitmapRenderTarget _renderTarget = renderTarget;
 
@@ -43,12 +43,13 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
 
         public override void Dispose()
         {
+            base.Dispose();
             _renderTarget.Dispose();
         }
 
         public override OptionalDispose<ID2D1Bitmap1> GetDirect2DBitmap(ID2D1RenderTarget target)
         {
-            return new OptionalDispose<ID2D1Bitmap1>(_renderTarget.Bitmap.QueryInterface<ID2D1Bitmap1>(), false);
+            return new OptionalDispose<ID2D1Bitmap1>(GetBitmap(_renderTarget), true);
         }
 
         public override void Save(Stream stream, int? quality = null)
@@ -66,6 +67,12 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
 
                 wic.Save(stream);
             }
+        }
+
+        private static ID2D1Bitmap1 GetBitmap(ID2D1BitmapRenderTarget renderTarget)
+        {
+            using var bitmap = renderTarget.Bitmap;
+            return bitmap.QueryInterface<ID2D1Bitmap1>();
         }
     }
 }

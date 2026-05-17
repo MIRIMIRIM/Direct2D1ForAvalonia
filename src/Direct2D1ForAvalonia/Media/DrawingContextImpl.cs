@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Reflection;
 using Avalonia.Media;
@@ -26,14 +27,22 @@ namespace MIR.Direct2D1ForAvalonia.Media
         private readonly bool _ownsDeviceContext;
         private readonly IDXGISwapChain1? _swapChain;
         private readonly Action? _finishedCallback;
+        private readonly Action? _cleanupCallback;
 
         private readonly Stack<RenderOptions> _renderOptionsStack = new Stack<RenderOptions>();
         private readonly Stack<TextOptions> _textOptionsStack = new Stack<TextOptions>();
         private readonly Stack<ID2D1Layer?> _layers = new Stack<ID2D1Layer?>();
         private readonly Stack<ID2D1Layer> _layerPool = new Stack<ID2D1Layer>();
+        private static readonly PropertyInfo? s_imageBrushBitmapProperty = typeof(IImageBrushSource).GetProperty(
+            "Bitmap",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly PropertyInfo? s_imageBrushBitmapItemProperty = s_imageBrushBitmapProperty?.PropertyType.GetProperty(
+            "Item",
+            BindingFlags.Instance | BindingFlags.Public);
         private RenderOptions _renderOptions;
         private TextOptions _textOptions;
         private readonly Matrix? _postTransform;
+        private readonly Matrix? _targetTransform;
         private Matrix _transform = Matrix.Identity;
 
         /// <summary>
@@ -47,17 +56,23 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="useScaledDrawing">Whether to scale drawings according to the DPI of <paramref name="renderTarget"/>.</param>
         /// <param name="swapChain">An optional swap chain associated with this drawing context.</param>
         /// <param name="finishedCallback">An optional delegate to be called when context is disposed.</param>
+        /// <param name="targetTransform">An optional transform required by the target surface.</param>
+        /// <param name="cleanupCallback">An optional delegate that is always called when context is disposed.</param>
         public DrawingContextImpl(
             ILayerFactory? layerFactory,
             ID2D1RenderTarget renderTarget,
             bool useScaledDrawing,
             IDXGISwapChain1? swapChain = null,
-            Action? finishedCallback = null)
+            Action? finishedCallback = null,
+            Matrix? targetTransform = null,
+            Action? cleanupCallback = null)
         {
             _layerFactory = layerFactory;
             _renderTarget = renderTarget;
             _swapChain = swapChain;
             _finishedCallback = finishedCallback;
+            _targetTransform = targetTransform;
+            _cleanupCallback = cleanupCallback;
 
             if (_renderTarget is ID2D1DeviceContext deviceContext)
             {
@@ -78,6 +93,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
             }
 
             _deviceContext.BeginDraw();
+
+            if (_targetTransform.HasValue)
+            {
+                ApplyTransform();
+            }
         }
 
         /// <summary>
@@ -89,8 +109,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             set
             {
                 _transform = value;
-                _deviceContext.Transform =
-                    (_postTransform.HasValue ? value * _postTransform.Value : value).ToDirect2D();
+                ApplyTransform();
             }
         }
 
@@ -145,11 +164,35 @@ namespace MIR.Direct2D1ForAvalonia.Media
             }
             finally
             {
-                if (_ownsDeviceContext)
+                try
                 {
-                    _deviceContext.Dispose();
+                    _cleanupCallback?.Invoke();
+                }
+                finally
+                {
+                    if (_ownsDeviceContext)
+                    {
+                        _deviceContext.Dispose();
+                    }
                 }
             }
+        }
+
+        private void ApplyTransform()
+        {
+            var transform = _transform;
+
+            if (_postTransform.HasValue)
+            {
+                transform *= _postTransform.Value;
+            }
+
+            if (_targetTransform.HasValue)
+            {
+                transform *= _targetTransform.Value;
+            }
+
+            _deviceContext.Transform = transform.ToDirect2D();
         }
 
         /// <summary>
@@ -748,19 +791,17 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public object? GetFeature(Type t) => null;
 
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.NonPublicProperties, typeof(IImageBrushSource))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties, "Avalonia.Utilities.IRef`1", "Avalonia.Base")]
         private static bool TryGetImageBrushBitmap(IImageBrushSource imageBrushSource, out BitmapImpl bitmap)
         {
             bitmap = null!;
 
-            var bitmapProperty = imageBrushSource.GetType().GetProperty(
-                "Bitmap",
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            var bitmapRef = bitmapProperty?.GetValue(imageBrushSource);
+            var bitmapRef = s_imageBrushBitmapProperty?.GetValue(imageBrushSource);
             if (bitmapRef is null)
                 return false;
 
-            var itemProperty = bitmapRef.GetType().GetProperty("Item", BindingFlags.Instance | BindingFlags.Public);
-            if (itemProperty?.GetValue(bitmapRef) is not BitmapImpl platformBitmap)
+            if (s_imageBrushBitmapItemProperty?.GetValue(bitmapRef) is not BitmapImpl platformBitmap)
                 return false;
 
             bitmap = platformBitmap;
