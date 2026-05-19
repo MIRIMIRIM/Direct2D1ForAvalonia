@@ -8,7 +8,7 @@
     <PublishAot>true</PublishAot>
     <TrimMode>full</TrimMode>
     <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <InvariantGlobalization>false</InvariantGlobalization>
     <!-- SharpGen.Runtime currently emits trim analysis warnings that are external to this repo. -->
     <NoWarn>$(NoWarn);IL2067;IL2072;IL2104</NoWarn>
   </PropertyGroup>
@@ -16,5 +16,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Direct2D1ForAvalonia\MIR.Direct2D1ForAvalonia.csproj" />
     <PackageReference Include="Avalonia.Desktop" Version="12.0.0" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.0" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.0" />
   </ItemGroup>
 </Project>

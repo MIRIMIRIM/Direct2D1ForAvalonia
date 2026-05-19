@@ -7,6 +7,7 @@ using Avalonia.Media;
 using Avalonia.Platform;
 using Avalonia.Utilities;
 using Avalonia.Media.Imaging;
+using MIR.Direct2D1ForAvalonia.Diagnostics;
 using BitmapInterpolationMode = Avalonia.Media.Imaging.BitmapInterpolationMode;
 using Vortice.Direct2D1;
 using Vortice.DXGI;
@@ -28,10 +29,12 @@ namespace MIR.Direct2D1ForAvalonia.Media
         private readonly IDXGISwapChain1? _swapChain;
         private readonly Action? _finishedCallback;
         private readonly Action? _cleanupCallback;
+        private readonly string _diagnosticTargetName;
 
         private readonly Stack<RenderOptions> _renderOptionsStack = new Stack<RenderOptions>();
         private readonly Stack<TextOptions> _textOptionsStack = new Stack<TextOptions>();
         private readonly Stack<ID2D1Layer?> _layers = new Stack<ID2D1Layer?>();
+        private readonly Stack<BrushImpl?> _opacityMaskBrushes = new Stack<BrushImpl?>();
         private readonly Stack<ID2D1Layer> _layerPool = new Stack<ID2D1Layer>();
         private static readonly PropertyInfo? s_imageBrushBitmapProperty = typeof(IImageBrushSource).GetProperty(
             "Bitmap",
@@ -73,6 +76,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             _finishedCallback = finishedCallback;
             _targetTransform = targetTransform;
             _cleanupCallback = cleanupCallback;
+            _diagnosticTargetName = _renderTarget.GetType().Name;
 
             if (_renderTarget is ID2D1DeviceContext deviceContext)
             {
@@ -90,6 +94,16 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 var scaling = _renderTarget.Dpi.Width / 96;
                 if (!AreClose(1, scaling))
                     _postTransform = Matrix.CreateScale(1 / scaling, 1 / scaling);
+            }
+
+            if (Direct2D1Diagnostics.IsEnabled)
+            {
+                Direct2D1Diagnostics.Write(
+                    $"drawing-context-create target={_renderTarget.GetType().Name} " +
+                    $"pixel={_renderTarget.PixelSize.Width}x{_renderTarget.PixelSize.Height} " +
+                    $"dpi={_renderTarget.Dpi.Width:0.###}x{_renderTarget.Dpi.Height:0.###} " +
+                    $"useScaledDrawing={useScaledDrawing} ownsDeviceContext={_ownsDeviceContext} " +
+                    $"postTransform={_postTransform?.ToString() ?? "null"} targetTransform={_targetTransform?.ToString() ?? "null"}");
             }
 
             _deviceContext.BeginDraw();
@@ -153,20 +167,46 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
             try
             {
-                _deviceContext.EndDraw().CheckError();
+                if (Direct2D1Diagnostics.IsEnabled)
+                {
+                    Direct2D1Diagnostics.Write(
+                        $"drawing-context-dispose begin target={_diagnosticTargetName} hasSwapChain={_swapChain != null} hasFinishedCallback={_finishedCallback != null} hasCleanupCallback={_cleanupCallback != null}");
+                }
 
-                _swapChain?.Present(1, PresentFlags.None).CheckError();
+                _deviceContext.EndDraw().CheckError();
+                if (Direct2D1Diagnostics.IsEnabled)
+                    Direct2D1Diagnostics.Write($"drawing-context-dispose enddraw target={_diagnosticTargetName}");
+
+                if (_swapChain != null)
+                {
+                    _swapChain.Present(1, PresentFlags.None).CheckError();
+                    if (Direct2D1Diagnostics.IsEnabled)
+                        Direct2D1Diagnostics.Write($"drawing-context-dispose present target={_diagnosticTargetName}");
+                }
+
                 _finishedCallback?.Invoke();
+                if (Direct2D1Diagnostics.IsEnabled)
+                    Direct2D1Diagnostics.Write($"drawing-context-dispose finished target={_diagnosticTargetName}");
             }
             catch (SharpGenException ex) when ((uint)ex.HResult == 0x8899000C) // D2DERR_RECREATE_TARGET
             {
+                if (Direct2D1Diagnostics.IsEnabled)
+                    Direct2D1Diagnostics.Write($"drawing-context-dispose recreate-target target={_diagnosticTargetName} hresult=0x{ex.HResult:X8}");
                 throw new RenderTargetCorruptedException(ex);
+            }
+            catch (Exception ex)
+            {
+                if (Direct2D1Diagnostics.IsEnabled)
+                    Direct2D1Diagnostics.Write($"drawing-context-dispose error target={_diagnosticTargetName} {ex.GetType().Name}: {ex.Message}");
+                throw;
             }
             finally
             {
                 try
                 {
                     _cleanupCallback?.Invoke();
+                    if (Direct2D1Diagnostics.IsEnabled)
+                        Direct2D1Diagnostics.Write($"drawing-context-dispose cleanup target={_diagnosticTargetName}");
                 }
                 finally
                 {
@@ -500,6 +540,15 @@ namespace MIR.Direct2D1ForAvalonia.Media
         public IDrawingContextLayerImpl CreateLayer(PixelSize pixelSize)
         {
             var dpi = new Avalonia.Vector(_deviceContext.Dpi.Width, _deviceContext.Dpi.Height);
+            if (Direct2D1Diagnostics.IsEnabled)
+            {
+                var requestedDip = pixelSize.ToSizeWithDpi(dpi);
+                Direct2D1Diagnostics.Write(
+                    $"drawing-context-create-layer requestedPixel={pixelSize.Width}x{pixelSize.Height} " +
+                    $"dpi={dpi.X:0.###}x{dpi.Y:0.###} requestedDip={requestedDip.Width:0.###}x{requestedDip.Height:0.###} " +
+                    $"hasLayerFactory={_layerFactory != null}");
+            }
+
             if (_layerFactory != null)
             {
                 return _layerFactory.CreateLayer(pixelSize.ToSizeWithDpi(dpi));
@@ -546,10 +595,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 MaskTransform = Matrix3x2.Identity,
                 Opacity = 1
             };
-            var layer = _layerPool.Count != 0 ? _layerPool.Pop() : _deviceContext.CreateLayer();
-            _deviceContext.PushLayer(parameters, layer);
-
-            _layers.Push(layer);
+            PushDirect2DLayer(parameters);
         }
 
         void IDrawingContextImpl.PopLayer()
@@ -583,10 +629,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     parameters.ContentBounds = bounds.Value.ToDirect2D();
                 }
 
-                var layer = _layerPool.Count != 0 ? _layerPool.Pop() : _deviceContext.CreateLayer();
-                _deviceContext.PushLayer(parameters, layer);
-
-                _layers.Push(layer);
+                PushDirect2DLayer(parameters);
             }
             else
                 _layers.Push(null);
@@ -629,6 +672,42 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 _deviceContext.PopLayer();
                 _layerPool.Push(layer);
             }
+        }
+
+        private void PushDirect2DLayer(LayerParameters parameters)
+        {
+            var layer = RentLayer(out var fromPool);
+            try
+            {
+                _deviceContext.PushLayer(parameters, layer);
+            }
+            catch
+            {
+                ReturnUnusedLayer(layer, fromPool);
+                throw;
+            }
+
+            _layers.Push(layer);
+        }
+
+        private ID2D1Layer RentLayer(out bool fromPool)
+        {
+            if (_layerPool.Count != 0)
+            {
+                fromPool = true;
+                return _layerPool.Pop();
+            }
+
+            fromPool = false;
+            return _deviceContext.CreateLayer();
+        }
+
+        private void ReturnUnusedLayer(ID2D1Layer layer, bool fromPool)
+        {
+            if (fromPool)
+                _layerPool.Push(layer);
+            else
+                layer.Dispose();
         }
 
         /// <summary>
@@ -747,10 +826,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 GeometricMask = ((GeometryImpl)clip).Geometry,
                 MaskAntialiasMode = AntialiasMode.PerPrimitive
             };
-            var layer = _layerPool.Count != 0 ? _layerPool.Pop() : _deviceContext.CreateLayer();
-            _deviceContext.PushLayer(parameters, layer);
-
-            _layers.Push(layer);
+            PushDirect2DLayer(parameters);
 
         }
 
@@ -771,22 +847,37 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void PushOpacityMask(IBrush mask, Rect bounds)
         {
+            var opacityBrush = CreateBrush(mask, bounds);
             var parameters = new LayerParameters
             {
                 ContentBounds = PrimitiveExtensions.RectangleInfinite,
                 MaskTransform = Matrix3x2.Identity,
                 Opacity = 1,
-                OpacityBrush = CreateBrush(mask, bounds).PlatformBrush
+                OpacityBrush = opacityBrush.PlatformBrush
             };
-            var layer = _layerPool.Count != 0 ? _layerPool.Pop() : _deviceContext.CreateLayer();
-            _deviceContext.PushLayer(parameters, layer);
+            try
+            {
+                PushDirect2DLayer(parameters);
+            }
+            catch
+            {
+                opacityBrush.Dispose();
+                throw;
+            }
 
-            _layers.Push(layer);
+            _opacityMaskBrushes.Push(opacityBrush);
         }
 
         public void PopOpacityMask()
         {
-            PopLayer();
+            try
+            {
+                PopLayer();
+            }
+            finally
+            {
+                _opacityMaskBrushes.Pop()?.Dispose();
+            }
         }
 
         public object? GetFeature(Type t) => null;

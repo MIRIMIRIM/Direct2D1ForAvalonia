@@ -12,6 +12,7 @@ using Avalonia.Media.TextFormatting;
 using Avalonia.Platform;
 using Avalonia.Platform.Surfaces;
 using Avalonia.Win32.DirectX;
+using MIR.Direct2D1ForAvalonia.Diagnostics;
 using GlyphRun = Avalonia.Media.GlyphRun;
 using Vortice.Direct3D11;
 using Vortice.Direct2D1;
@@ -133,11 +134,12 @@ namespace MIR.Direct2D1ForAvalonia
         {
             IDirect3D11TexturePlatformSurface? textureSurface = null;
             IExternalDirect2DRenderTargetSurface? externalSurface = null;
-            INativePlatformHandleSurface? hwndSurface = null;
-            IFramebufferPlatformSurface? framebufferSurface = null;
+            List<string>? surfaceDescriptions = Direct2D1Diagnostics.IsEnabled ? new List<string>() : null;
 
             foreach (var s in surfaces)
             {
+                surfaceDescriptions?.Add(DescribeSurface(s));
+
                 if (s is IDirect3D11TexturePlatformSurface texture)
                 {
                     textureSurface = texture;
@@ -149,25 +151,17 @@ namespace MIR.Direct2D1ForAvalonia
                     externalSurface = external;
                     continue;
                 }
-
-                if (s is INativePlatformHandleSurface nativeWindow)
-                {
-                    if (nativeWindow.HandleDescriptor == "HWND")
-                    {
-                        hwndSurface = nativeWindow;
-                    }
-
-                    continue;
-                }
-
-                if (s is IFramebufferPlatformSurface fb)
-                {
-                    framebufferSurface = fb;
-                }
             }
 
             if (textureSurface != null)
             {
+                if (Direct2D1Diagnostics.IsEnabled)
+                {
+                    Direct2D1Diagnostics.Write(
+                        $"create-render-target selected=d3d11-texture graphicsContext={graphicsContext?.GetType().FullName ?? "null"} " +
+                        $"surfaces={string.Join(" | ", surfaceDescriptions!)}");
+                }
+
                 return new D3D11TextureRenderTarget(
                     textureSurface,
                     graphicsContext ?? Direct2DGraphicsContext.Instance);
@@ -175,20 +169,37 @@ namespace MIR.Direct2D1ForAvalonia
 
             if (externalSurface != null)
             {
+                if (Direct2D1Diagnostics.IsEnabled)
+                {
+                    Direct2D1Diagnostics.Write(
+                        $"create-render-target selected=external-d2d graphicsContext={graphicsContext?.GetType().FullName ?? "null"} " +
+                        $"surfaces={string.Join(" | ", surfaceDescriptions!)}");
+                }
+
                 return new ExternalRenderTarget(externalSurface);
             }
 
-            if (hwndSurface != null)
+            if (Direct2D1Diagnostics.IsEnabled)
             {
-                return new HwndRenderTarget(hwndSurface);
+                Direct2D1Diagnostics.Write(
+                    $"create-render-target selected=unsupported graphicsContext={graphicsContext?.GetType().FullName ?? "null"} " +
+                    $"surfaces={string.Join(" | ", surfaceDescriptions!)}");
             }
 
-            if (framebufferSurface != null)
+            throw new NotSupportedException(
+                "Direct2D1 window rendering requires an IDirect3D11TexturePlatformSurface or an external Direct2D render target. " +
+                "HWND swap chain and framebuffer fallback surfaces are intentionally unsupported because they produce incomplete window rendering on Avalonia 12.");
+        }
+
+        private static string DescribeSurface(IPlatformRenderSurface surface)
+        {
+            var type = surface.GetType().FullName ?? surface.GetType().Name;
+            if (surface is INativePlatformHandleSurface native)
             {
-                return new FramebufferShimRenderTarget(framebufferSurface);
+                return $"{type}(native:{native.HandleDescriptor}, handle={native.Handle})";
             }
 
-            throw new NotSupportedException("Don't know how to create a Direct2D1 renderer from any of provided surfaces");
+            return $"{type}(texture={surface is IDirect3D11TexturePlatformSurface}, external={surface is IExternalDirect2DRenderTargetSurface}, framebuffer={surface is IFramebufferPlatformSurface})";
         }
 
         public IRenderTargetBitmapImpl CreateRenderTargetBitmap(PixelSize size, Vector dpi)

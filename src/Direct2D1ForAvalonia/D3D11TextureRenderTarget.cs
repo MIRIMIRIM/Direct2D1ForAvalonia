@@ -4,6 +4,7 @@ using System;
 using System.Runtime.InteropServices;
 using Avalonia.Platform;
 using Avalonia.Win32.DirectX;
+using MIR.Direct2D1ForAvalonia.Diagnostics;
 using MIR.Direct2D1ForAvalonia.Media;
 using Vortice.Direct2D1;
 using Vortice.Direct3D11;
@@ -14,10 +15,15 @@ namespace MIR.Direct2D1ForAvalonia
 {
     internal sealed class D3D11TextureRenderTarget : IRenderTarget, ILayerFactory
     {
+        private const int MaxCachedTextureTargets = 4;
+
         private readonly IDirect3D11TextureRenderTarget _target;
         private readonly ID2D1DeviceContext _deviceContext;
+        private readonly TextureTargetCacheEntry?[] _textureTargetCache = new TextureTargetCacheEntry?[MaxCachedTextureTargets];
         private Vector _lastDpi = new Vector(96, 96);
         private bool _disposed;
+        private int _frameId;
+        private long _cacheClock;
 
         public D3D11TextureRenderTarget(
             IDirect3D11TexturePlatformSurface surface,
@@ -49,13 +55,21 @@ namespace MIR.Direct2D1ForAvalonia
 
             properties = default;
 
+            var frameId = ++_frameId;
             var session = _target.BeginDraw();
-            ID2D1Bitmap1? d2dBitmap = null;
-            IDXGISurface? dxgiSurface = null;
-            ID3D11Texture2D? texture = null;
+            TextureTargetCacheEntry? targetEntry = null;
 
             try
             {
+                if (Direct2D1Diagnostics.ShouldLogFrame(frameId, important: frameId == 1))
+                {
+                    Direct2D1Diagnostics.Write(
+                        $"d3d11-texture-frame begin id={frameId} " +
+                        $"targetState={_target.State} sceneSize={FormatSize(sceneInfo.Size)} sceneScaling={sceneInfo.Scaling:0.###} " +
+                        $"sessionSize={FormatSize(session.Size)} sessionScaling={session.Scaling:0.###} sessionOffset={FormatPoint(session.Offset)} " +
+                        $"texture=0x{session.D3D11Texture2D.ToInt64():X}");
+                }
+
                 if (session.Size.Width <= 0 || session.Size.Height <= 0)
                 {
                     throw new InvalidOperationException("The D3D11 texture render target has an invalid size.");
@@ -77,22 +91,20 @@ namespace MIR.Direct2D1ForAvalonia
                     throw new InvalidOperationException("The D3D11 texture render target returned a null texture.");
                 }
 
-                Marshal.AddRef(texturePointer);
-                texture = new ID3D11Texture2D(texturePointer);
-                dxgiSurface = texture.QueryInterface<IDXGISurface>();
-                d2dBitmap = _deviceContext.CreateBitmapFromDxgiSurface(
-                    dxgiSurface,
-                    new BitmapProperties1(
-                        new Vortice.DCommon.PixelFormat
-                        {
-                            AlphaMode = Vortice.DCommon.AlphaMode.Premultiplied,
-                            Format = Format.B8G8R8A8_UNorm
-                        },
-                        (float)dpi.X,
-                        (float)dpi.Y,
-                        BitmapOptions.Target | BitmapOptions.CannotDraw));
+                var cacheHit = TryGetTextureTarget(texturePointer, session.Size, dpi, out targetEntry);
+                if (!cacheHit)
+                    targetEntry = CreateAndCacheTextureTarget(texturePointer, session.Size, dpi);
 
-                _deviceContext.Target = d2dBitmap;
+                _deviceContext.Target = targetEntry.Bitmap;
+
+                if (Direct2D1Diagnostics.ShouldLogFrame(frameId, important: frameId == 1))
+                {
+                    Direct2D1Diagnostics.Write(
+                        $"d3d11-texture-frame target id={frameId} " +
+                        $"cache={(cacheHit ? "hit" : "miss")} " +
+                        $"d2dBitmapPixel={FormatSize(targetEntry.Bitmap.PixelSize)} d2dBitmapDpi={FormatSize(targetEntry.Bitmap.Dpi)} " +
+                        $"contextPixel={FormatSize(_deviceContext.PixelSize)} contextDpi={FormatSize(_deviceContext.Dpi)}");
+                }
 
                 var targetTransform = session.Offset == default
                     ? (Matrix?)null
@@ -104,16 +116,18 @@ namespace MIR.Direct2D1ForAvalonia
                     this,
                     _deviceContext,
                     useScaledDrawing: false,
-                    finishedCallback: FlushDirect3DDevice,
+                    finishedCallback: () => FlushDirect3DDevice(frameId),
                     targetTransform: targetTransform,
                     cleanupCallback: () =>
                     {
+                        if (Direct2D1Diagnostics.ShouldLogFrame(frameId, important: frameId == 1))
+                        {
+                            Direct2D1Diagnostics.Write($"d3d11-texture-frame cleanup id={frameId}");
+                        }
+
                         try
                         {
                             _deviceContext.Target = null;
-                            d2dBitmap.Dispose();
-                            dxgiSurface.Dispose();
-                            texture.Dispose();
                         }
                         finally
                         {
@@ -124,9 +138,6 @@ namespace MIR.Direct2D1ForAvalonia
             catch
             {
                 _deviceContext.Target = null;
-                d2dBitmap?.Dispose();
-                dxgiSurface?.Dispose();
-                texture?.Dispose();
                 session.Dispose();
                 throw;
             }
@@ -136,6 +147,12 @@ namespace MIR.Direct2D1ForAvalonia
         {
             var dpi = _lastDpi;
             var pixelSize = PixelSize.FromSizeWithDpi(size, dpi);
+            if (Direct2D1Diagnostics.IsEnabled)
+            {
+                Direct2D1Diagnostics.Write(
+                    $"d3d11-texture-create-layer requestedDip={FormatSize(size)} pixel={FormatSize(pixelSize)} dpi={FormatSize(dpi)}");
+            }
+
             return new WicRenderTargetBitmapImpl(pixelSize, dpi);
         }
 
@@ -148,13 +165,208 @@ namespace MIR.Direct2D1ForAvalonia
 
             _disposed = true;
             _deviceContext.Target = null;
+            ClearTextureTargetCache();
             _deviceContext.Dispose();
             _target.Dispose();
         }
 
-        private static void FlushDirect3DDevice()
+        private bool TryGetTextureTarget(IntPtr texturePointer, PixelSize pixelSize, Vector dpi, out TextureTargetCacheEntry entry)
         {
+            for (var i = 0; i < _textureTargetCache.Length; i++)
+            {
+                var candidate = _textureTargetCache[i];
+                if (candidate is null
+                    || candidate.TexturePointer != texturePointer
+                    || candidate.PixelSize != pixelSize
+                    || !AreSameDpi(candidate.Dpi, dpi))
+                {
+                    continue;
+                }
+
+                candidate.LastUsed = ++_cacheClock;
+                entry = candidate;
+                return true;
+            }
+
+            entry = null!;
+            return false;
+        }
+
+        private TextureTargetCacheEntry CreateAndCacheTextureTarget(IntPtr texturePointer, PixelSize pixelSize, Vector dpi)
+        {
+            Marshal.AddRef(texturePointer);
+            var ownsRawTextureReference = true;
+            TextureTargetCacheEntry? entry = null;
+            ID3D11Texture2D? texture = null;
+            IDXGISurface? dxgiSurface = null;
+            ID2D1Bitmap1? bitmap = null;
+
+            try
+            {
+                texture = new ID3D11Texture2D(texturePointer);
+                ownsRawTextureReference = false;
+                dxgiSurface = texture.QueryInterface<IDXGISurface>();
+                bitmap = _deviceContext.CreateBitmapFromDxgiSurface(
+                    dxgiSurface,
+                    new BitmapProperties1(
+                        new Vortice.DCommon.PixelFormat
+                        {
+                            AlphaMode = Vortice.DCommon.AlphaMode.Premultiplied,
+                            Format = Format.B8G8R8A8_UNorm
+                        },
+                        (float)dpi.X,
+                        (float)dpi.Y,
+                        BitmapOptions.Target | BitmapOptions.CannotDraw));
+
+                entry = new TextureTargetCacheEntry(texturePointer, pixelSize, dpi, texture, dxgiSurface, bitmap)
+                {
+                    LastUsed = ++_cacheClock
+                };
+                texture = null;
+                dxgiSurface = null;
+                bitmap = null;
+                StoreTextureTarget(entry);
+                return entry;
+            }
+            catch
+            {
+                entry?.Dispose();
+                throw;
+            }
+            finally
+            {
+                if (ownsRawTextureReference)
+                    Marshal.Release(texturePointer);
+
+                bitmap?.Dispose();
+                dxgiSurface?.Dispose();
+                texture?.Dispose();
+            }
+        }
+
+        private void StoreTextureTarget(TextureTargetCacheEntry entry)
+        {
+            var slot = 0;
+            var oldest = long.MaxValue;
+
+            for (var i = 0; i < _textureTargetCache.Length; i++)
+            {
+                var candidate = _textureTargetCache[i];
+                if (candidate is null)
+                {
+                    slot = i;
+                    oldest = long.MaxValue;
+                    break;
+                }
+
+                if (candidate.LastUsed < oldest)
+                {
+                    slot = i;
+                    oldest = candidate.LastUsed;
+                }
+            }
+
+            if (_textureTargetCache[slot] is { } oldEntry)
+            {
+                if (Direct2D1Diagnostics.IsEnabled)
+                {
+                    Direct2D1Diagnostics.Write(
+                        $"d3d11-texture-cache evict texture=0x{oldEntry.TexturePointer.ToInt64():X} pixel={FormatSize(oldEntry.PixelSize)} dpi={FormatSize(oldEntry.Dpi)}");
+                }
+
+                _textureTargetCache[slot]?.Dispose();
+            }
+
+            _textureTargetCache[slot] = entry;
+        }
+
+        private void ClearTextureTargetCache()
+        {
+            for (var i = 0; i < _textureTargetCache.Length; i++)
+            {
+                if (_textureTargetCache[i] is { } entry && Direct2D1Diagnostics.IsEnabled)
+                {
+                    Direct2D1Diagnostics.Write(
+                        $"d3d11-texture-cache dispose texture=0x{entry.TexturePointer.ToInt64():X} pixel={FormatSize(entry.PixelSize)} dpi={FormatSize(entry.Dpi)}");
+                }
+
+                _textureTargetCache[i]?.Dispose();
+                _textureTargetCache[i] = null;
+            }
+        }
+
+        private static void FlushDirect3DDevice(int frameId)
+        {
+            if (Direct2D1Diagnostics.ShouldLogFrame(frameId, important: frameId == 1))
+            {
+                Direct2D1Diagnostics.Write($"d3d11-texture-flush id={frameId}");
+            }
+
             Direct2D1Platform.Direct3D11ImmediateContext.Flush();
+        }
+
+        private static string FormatSize(PixelSize size)
+            => $"{size.Width}x{size.Height}";
+
+        private static string FormatSize(Size size)
+            => $"{size.Width:0.###}x{size.Height:0.###}";
+
+        private static string FormatSize(Vector size)
+            => $"{size.X:0.###}x{size.Y:0.###}";
+
+        private static string FormatSize(Vortice.Mathematics.SizeI size)
+            => $"{size.Width}x{size.Height}";
+
+        private static string FormatSize(Vortice.Mathematics.Size size)
+            => $"{size.Width:0.###}x{size.Height:0.###}";
+
+        private static string FormatSize(System.Drawing.SizeF size)
+            => $"{size.Width:0.###}x{size.Height:0.###}";
+
+        private static string FormatPoint(PixelPoint point)
+            => $"{point.X},{point.Y}";
+
+        private static bool AreSameDpi(Vector left, Vector right)
+            => Math.Abs(left.X - right.X) < 0.0001 && Math.Abs(left.Y - right.Y) < 0.0001;
+
+        private sealed class TextureTargetCacheEntry : IDisposable
+        {
+            public TextureTargetCacheEntry(
+                IntPtr texturePointer,
+                PixelSize pixelSize,
+                Vector dpi,
+                ID3D11Texture2D texture,
+                IDXGISurface dxgiSurface,
+                ID2D1Bitmap1 bitmap)
+            {
+                TexturePointer = texturePointer;
+                PixelSize = pixelSize;
+                Dpi = dpi;
+                Texture = texture;
+                DxgiSurface = dxgiSurface;
+                Bitmap = bitmap;
+            }
+
+            public IntPtr TexturePointer { get; }
+
+            public PixelSize PixelSize { get; }
+
+            public Vector Dpi { get; }
+
+            public ID3D11Texture2D Texture { get; }
+
+            public IDXGISurface DxgiSurface { get; }
+
+            public ID2D1Bitmap1 Bitmap { get; }
+
+            public long LastUsed { get; set; }
+
+            public void Dispose()
+            {
+                Bitmap.Dispose();
+                DxgiSurface.Dispose();
+                Texture.Dispose();
+            }
         }
     }
 }

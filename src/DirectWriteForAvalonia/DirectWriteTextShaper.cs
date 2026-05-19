@@ -802,6 +802,7 @@ namespace MIR.DirectWriteForAvalonia
 
             var segments = new List<FeatureSegment>(distinctCount - 1);
             Vortice.DirectWrite.FontFeature[]? lastFeatures = null;
+            var featureScratch = new Vortice.DirectWrite.FontFeature[parsed.Count];
 
             for (var i = 0; i < distinctCount - 1; i++)
             {
@@ -812,21 +813,20 @@ namespace MIR.DirectWriteForAvalonia
 
                 var segmentLength = segmentEnd - segmentStart;
 
-                List<Vortice.DirectWrite.FontFeature>? activeFeatures = null;
+                var activeFeatureCount = 0;
                 for (var j = 0; j < parsed.Count; j++)
                 {
                     if (!parsed[j].Contains(segmentStart))
                         continue;
 
-                    activeFeatures ??= new List<Vortice.DirectWrite.FontFeature>(parsed.Count);
-                    activeFeatures.Add(new Vortice.DirectWrite.FontFeature
+                    featureScratch[activeFeatureCount++] = new Vortice.DirectWrite.FontFeature
                     {
                         NameTag = parsed[j].Tag,
                         Parameter = parsed[j].Value
-                    });
+                    };
                 }
 
-                var currentFeatures = activeFeatures is { Count: > 0 } ? activeFeatures.ToArray() : null;
+                var currentFeatures = CreateFeatureArray(featureScratch, activeFeatureCount);
 
                 if (segments.Count > 0 && FeatureSetEquals(lastFeatures, currentFeatures))
                 {
@@ -841,6 +841,18 @@ namespace MIR.DirectWriteForAvalonia
             }
 
             return segments;
+        }
+
+        private static Vortice.DirectWrite.FontFeature[]? CreateFeatureArray(
+            Vortice.DirectWrite.FontFeature[] scratch,
+            int count)
+        {
+            if (count == 0)
+                return null;
+
+            var features = new Vortice.DirectWrite.FontFeature[count];
+            Array.Copy(scratch, features, count);
+            return features;
         }
 
         private static bool FeatureSetEquals(Vortice.DirectWrite.FontFeature[]? left, Vortice.DirectWrite.FontFeature[]? right)
@@ -865,16 +877,23 @@ namespace MIR.DirectWriteForAvalonia
 
         private sealed class DWriteFeatureRanges : IDisposable
         {
-            public static readonly DWriteFeatureRanges Empty = new(null, null, 0, null);
+            public static readonly DWriteFeatureRanges Empty = new(null, null, 0, IntPtr.Zero, IntPtr.Zero);
 
-            private readonly List<IntPtr>? _allocations;
+            private readonly IntPtr _featurePointer;
+            private readonly IntPtr _typographicFeaturesPointer;
 
-            private DWriteFeatureRanges(IntPtr? features, uint[]? featureRangeLengths, uint featureRanges, List<IntPtr>? allocations)
+            private DWriteFeatureRanges(
+                IntPtr? features,
+                uint[]? featureRangeLengths,
+                uint featureRanges,
+                IntPtr featurePointer,
+                IntPtr typographicFeaturesPointer)
             {
                 Features = features;
                 FeatureRangeLengths = featureRangeLengths;
                 FeatureRanges = featureRanges;
-                _allocations = allocations;
+                _featurePointer = featurePointer;
+                _typographicFeaturesPointer = typographicFeaturesPointer;
             }
 
             public IntPtr? Features { get; }
@@ -886,38 +905,43 @@ namespace MIR.DirectWriteForAvalonia
                 if (fontFeatures is null || fontFeatures.Count == 0 || textLength <= 0)
                     return Empty;
 
-                var allocations = new List<IntPtr>(2);
-
                 var featurePointer = AllocateStructArray(fontFeatures);
-                allocations.Add(featurePointer);
+                var typographicFeaturesPointer = IntPtr.Zero;
 
-                var typographicFeatures = new TypographicFeatures
+                try
                 {
-                    Features = featurePointer,
-                    FeatureCount = (uint)fontFeatures.Count
-                };
+                    var typographicFeatures = new TypographicFeatures
+                    {
+                        Features = featurePointer,
+                        FeatureCount = (uint)fontFeatures.Count
+                    };
 
-                var typographicFeaturesPointer = Marshal.AllocHGlobal(Marshal.SizeOf<TypographicFeatures>());
-                allocations.Add(typographicFeaturesPointer);
-                Marshal.StructureToPtr(typographicFeatures, typographicFeaturesPointer, false);
+                    typographicFeaturesPointer = Marshal.AllocHGlobal(Marshal.SizeOf<TypographicFeatures>());
+                    Marshal.StructureToPtr(typographicFeatures, typographicFeaturesPointer, false);
 
-                return new DWriteFeatureRanges(
-                    typographicFeaturesPointer,
-                    new[] { unchecked((uint)textLength) },
-                    featureRanges: 1,
-                    allocations);
+                    return new DWriteFeatureRanges(
+                        typographicFeaturesPointer,
+                        new[] { unchecked((uint)textLength) },
+                        featureRanges: 1,
+                        featurePointer,
+                        typographicFeaturesPointer);
+                }
+                catch
+                {
+                    if (typographicFeaturesPointer != IntPtr.Zero)
+                        Marshal.FreeHGlobal(typographicFeaturesPointer);
+                    if (featurePointer != IntPtr.Zero)
+                        Marshal.FreeHGlobal(featurePointer);
+                    throw;
+                }
             }
 
             public void Dispose()
             {
-                if (_allocations is null)
-                    return;
-
-                for (var i = 0; i < _allocations.Count; i++)
-                {
-                    if (_allocations[i] != IntPtr.Zero)
-                        Marshal.FreeHGlobal(_allocations[i]);
-                }
+                if (_typographicFeaturesPointer != IntPtr.Zero)
+                    Marshal.FreeHGlobal(_typographicFeaturesPointer);
+                if (_featurePointer != IntPtr.Zero)
+                    Marshal.FreeHGlobal(_featurePointer);
             }
 
             private static IntPtr AllocateStructArray<T>(IReadOnlyList<T> values) where T : struct

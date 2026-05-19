@@ -1,4 +1,3 @@
-using System.Linq;
 using System.Numerics;
 using Avalonia.Media;
 using Vortice.Direct2D1;
@@ -17,11 +16,16 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 return;
             }
 
-            var gradientStops = brush.GradientStops.Select(s => new Vortice.Direct2D1.GradientStop
+            var gradientStops = new Vortice.Direct2D1.GradientStop[brush.GradientStops.Count];
+            var index = 0;
+            foreach (var stop in brush.GradientStops)
             {
-                Color = s.Color.ToDirect2D(),
-                Position = (float)s.Offset
-            }).ToArray();
+                gradientStops[index++] = new Vortice.Direct2D1.GradientStop
+                {
+                    Color = stop.Color.ToDirect2D(),
+                    Position = (float)stop.Offset
+                };
+            }
 
             var centerPoint = brush.Center.ToPixels(destinationRect);
             var gradientOrigin = brush.GradientOrigin.ToPixels(destinationRect) - centerPoint;

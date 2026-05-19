@@ -5,7 +5,7 @@
     <PackageId>MIR.Direct2D1ForAvalonia</PackageId>
     <RootNamespace>MIR.Direct2D1ForAvalonia</RootNamespace>
     <Title>MIR.Direct2D1ForAvalonia</Title>
-    <Version>12.0.0.2</Version>
+    <Version>12.0.0.3</Version>
     <Description>Direct2D1 rendering backend for Avalonia 12 on Windows, maintained as an independent derivative.</Description>
     <PackageTags>Avalonia;Direct2D1;Win32;Rendering;Graphics</PackageTags>
   </PropertyGroup>
@@ -24,10 +24,11 @@
     <PackageReference Include="Avalonia" Version="12.0.0" ExcludeAssets="compile" />
     <PackageReference Include="Avalonia.HarfBuzz" Version="12.0.0" />
     <PackageReference Include="Avalonia.Win32" Version="12.0.0" ExcludeAssets="compile" />
-    <PackageReference Include="Vortice.Direct2D1" Version="3.8.2" />
-    <PackageReference Include="Vortice.Direct3D11" Version="3.8.2" />
-    <PackageReference Include="Vortice.DXGI" Version="3.8.2" />
-    <PackageReference Include="Vortice.DirectX" Version="3.8.2" />
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageReference Include="Vortice.DirectX" Version="3.8.3" />
+    <PackageReference Include="Vortice.Mathematics" Version="2.1.1" />
   </ItemGroup>
 
   <ItemGroup>

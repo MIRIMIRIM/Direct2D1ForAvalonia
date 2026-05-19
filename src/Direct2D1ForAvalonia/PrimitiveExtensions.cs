@@ -1,5 +1,4 @@
 using System;
-using System.Linq;
 using System.Numerics;
 using Vortice;
 using Vortice.Direct2D1;
@@ -121,7 +120,12 @@ namespace MIR.Direct2D1ForAvalonia
             {
                 properties.DashStyle = DashStyle.Custom;
                 properties.DashOffset = (float)pen.DashStyle.Offset;
-                dashes = pen.DashStyle.Dashes.Select(x => (float)x).ToArray();
+                dashes = new float[pen.DashStyle.Dashes.Count];
+                var index = 0;
+                foreach (var dash in pen.DashStyle.Dashes)
+                {
+                    dashes[index++] = (float)dash;
+                }
             }
 
             return factory.CreateStrokeStyle(properties, dashes ?? []);

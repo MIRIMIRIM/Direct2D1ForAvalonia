@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using Avalonia.Platform;
+using MIR.Direct2D1ForAvalonia.Diagnostics;
 using Vortice.Direct2D1;
 
 namespace MIR.Direct2D1ForAvalonia.Media.Imaging
@@ -13,12 +14,27 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
             ID2D1RenderTarget renderTarget,
             Size size)
         {
+            if (Direct2D1Diagnostics.IsEnabled)
+            {
+                Direct2D1Diagnostics.Write(
+                    $"d2d-compatible-rt requestedDip={size.Width:0.###}x{size.Height:0.###} " +
+                    $"parentPixel={renderTarget.PixelSize.Width}x{renderTarget.PixelSize.Height} " +
+                    $"parentDpi={renderTarget.Dpi.Width:0.###}x{renderTarget.Dpi.Height:0.###}");
+            }
+
             var bitmapRenderTarget = renderTarget.CreateCompatibleRenderTarget(
                 new Vortice.Mathematics.Size((float)size.Width, (float)size.Height),
                 null,
                 null,
                 CompatibleRenderTargetOptions.None);
-            ;
+
+            if (Direct2D1Diagnostics.IsEnabled)
+            {
+                Direct2D1Diagnostics.Write(
+                    $"d2d-compatible-rt-created pixel={bitmapRenderTarget.PixelSize.Width}x{bitmapRenderTarget.PixelSize.Height} " +
+                    $"dpi={bitmapRenderTarget.Dpi.Width:0.###}x{bitmapRenderTarget.Dpi.Height:0.###}");
+            }
+
             return new D2DRenderTargetBitmapImpl(bitmapRenderTarget);
         }
 
@@ -61,8 +77,8 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
                     dc.DrawBitmap(
                         this,
                         1,
-                        new Rect(PixelSize.ToSizeWithDpi(Dpi.X)),
-                        new Rect(PixelSize.ToSizeWithDpi(Dpi.X)));
+                        new Rect(PixelSize.ToSizeWithDpi(Dpi)),
+                        new Rect(PixelSize.ToSizeWithDpi(Dpi)));
                 }
 
                 wic.Save(stream);

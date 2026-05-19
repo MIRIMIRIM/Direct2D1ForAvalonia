@@ -3,9 +3,13 @@ using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Controls.Primitives;
+using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using Avalonia.Styling;
+using Avalonia.Themes.Fluent;
 using Avalonia.Threading;
 using Avalonia.Win32;
 using MIR.Direct2D1ForAvalonia;
@@ -25,6 +29,7 @@ return AppBuilder.Configure(() => new SmokeApp(options))
     .UseWin32()
     .UseDirect2D1()
     .UseDirectWrite()
+    .WithInterFont()
     .StartWithClassicDesktopLifetime(args, ShutdownMode.OnExplicitShutdown);
 
 internal static class OffscreenSmoke
@@ -82,10 +87,31 @@ internal sealed class SmokeApp : Application
 
     public override void OnFrameworkInitializationCompleted()
     {
+        RequestedThemeVariant = ThemeVariant.Light;
+        Styles.Add(new FluentTheme());
+
+        FontFallbackSmoke.Run();
         OffscreenSmoke.Run(_options);
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            if (_options.UiRepro)
+            {
+                Window repro = _options.AfsRepro
+                    ? new AssFontSubsetReproWindow(x: 0, y: 0)
+                    : new UiReproWindow(x: 80, y: 80);
+                desktop.MainWindow = repro;
+                repro.Show();
+
+                if (_options.AutoExit)
+                {
+                    StartUiReproAutoExitTimer(desktop, repro);
+                }
+
+                base.OnFrameworkInitializationCompleted();
+                return;
+            }
+
             var normal = new SmokeWindow("Direct2D1 normal", transparent: false, x: 80, y: 80);
             var transparent = new SmokeWindow("Direct2D1 transparent", transparent: true, x: 500, y: 120);
 
@@ -171,6 +197,99 @@ internal sealed class SmokeApp : Application
 
         timer.Start();
     }
+
+    private void StartUiReproAutoExitTimer(
+        IClassicDesktopStyleApplicationLifetime desktop,
+        Window window)
+    {
+        var started = DateTimeOffset.UtcNow;
+        var ticks = 0;
+        var captured = false;
+        var timer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(33)
+        };
+
+        timer.Tick += (_, _) =>
+        {
+            ticks++;
+            if (window.Content is Control control)
+            {
+                control.InvalidateVisual();
+            }
+
+            var elapsed = DateTimeOffset.UtcNow - started;
+            if (!captured && ticks >= _options.MinFrames && elapsed >= TimeSpan.FromMilliseconds(500))
+            {
+                captured = true;
+                try
+                {
+                    Directory.CreateDirectory(_options.OutputDirectory);
+                    var reproPath = Path.Combine(_options.OutputDirectory, window is AssFontSubsetReproWindow ? "afs-repro-window.png" : "ui-repro-window.png");
+
+                    WindowScreenshot.Capture(window, reproPath);
+                    ScreenshotVerifier.VerifyPng(reproPath, "UI repro window");
+                    ScreenshotVerifier.VerifyBottomMarker(reproPath, IReproMarker.MarkerColor);
+
+                    timer.Stop();
+                    Console.WriteLine($"UI repro smoke passed. ticks={ticks}, screenshot={reproPath}");
+                    desktop.Shutdown(0);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    timer.Stop();
+                    Console.Error.WriteLine("UI repro screenshot failed: " + ex);
+                    desktop.Shutdown(3);
+                    return;
+                }
+            }
+
+            if (elapsed >= _options.Timeout)
+            {
+                timer.Stop();
+                Console.Error.WriteLine($"UI repro smoke timed out. ticks={ticks}");
+                desktop.Shutdown(2);
+            }
+        };
+
+        timer.Start();
+    }
+}
+
+internal static class FontFallbackSmoke
+{
+    public static void Run()
+    {
+        var culture = TryGetCulture("zh-CN");
+        if (!FontManager.Current.TryMatchCharacter(
+                '后',
+                FontStyle.Normal,
+                FontWeight.Normal,
+                FontStretch.Normal,
+                new FontFamily("Inter"),
+                culture,
+                out var typeface))
+        {
+            throw new InvalidOperationException("DirectWrite font fallback failed for Chinese character U+540E.");
+        }
+
+        Console.WriteLine(
+            $"Font fallback smoke passed. culture={(string.IsNullOrWhiteSpace(culture.Name) ? "Invariant" : culture.Name)}, " +
+            $"matchedFamily={typeface.FontFamily.Name}");
+    }
+
+    private static CultureInfo TryGetCulture(string name)
+    {
+        try
+        {
+            return CultureInfo.GetCultureInfo(name);
+        }
+        catch (CultureNotFoundException)
+        {
+            return CultureInfo.InvariantCulture;
+        }
+    }
 }
 
 internal sealed class SmokeWindow : Window
@@ -201,6 +320,337 @@ internal sealed class SmokeWindow : Window
     }
 
     public SmokeSurface Surface { get; }
+}
+
+internal sealed class UiReproWindow : Window
+{
+    public UiReproWindow(int x, int y)
+    {
+        Title = "Direct2D1 UI repro";
+        Width = 760;
+        Height = 540;
+        Position = new PixelPoint(x, y);
+        ShowActivated = true;
+        Topmost = true;
+        CanResize = false;
+        Background = Brushes.White;
+        Content = CreateContent();
+    }
+
+    private static Control CreateContent()
+    {
+        var root = new DockPanel
+        {
+            LastChildFill = true,
+            Background = Brushes.White
+        };
+
+        var marker = new Border
+        {
+            Height = 14,
+            Background = new SolidColorBrush(IReproMarker.MarkerColor),
+            Opacity = 0.98
+        };
+        DockPanel.SetDock(marker, Dock.Bottom);
+        root.Children.Add(marker);
+
+        var footer = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10,
+            Margin = new Thickness(18, 10, 18, 12),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        footer.Children.Add(new RadioButton { Content = "保留源样式", IsChecked = true });
+        footer.Children.Add(new RadioButton { Content = "仅子集化" });
+        footer.Children.Add(new CheckBox { Content = "自动加载字体", IsChecked = true });
+        footer.Children.Add(new ProgressBar { Width = 120, Height = 8, Minimum = 0, Maximum = 100, Value = 72 });
+        footer.Children.Add(new Button { Content = "生成子集", MinWidth = 96 });
+        DockPanel.SetDock(footer, Dock.Bottom);
+        root.Children.Add(footer);
+
+        var header = new StackPanel
+        {
+            Spacing = 4,
+            Margin = new Thickness(18, 14, 18, 8)
+        };
+        header.Children.Add(new TextBlock
+        {
+            Text = "Direct2D1 字体和控件复现",
+            FontSize = 22,
+            FontWeight = FontWeight.SemiBold,
+            FontFamily = new FontFamily("Inter")
+        });
+        header.Children.Add(new TextBlock
+        {
+            Text = "Inter 首选字体包含中文回退: 后备字体、路径选择、滚动区域和底部操作栏必须完整显示。",
+            FontSize = 13,
+            Foreground = new SolidColorBrush(Color.FromRgb(70, 70, 70)),
+            TextWrapping = TextWrapping.Wrap
+        });
+        DockPanel.SetDock(header, Dock.Top);
+        root.Children.Add(header);
+
+        var body = new StackPanel
+        {
+            Spacing = 10,
+            Margin = new Thickness(18, 0, 18, 0),
+            Opacity = 0.995
+        };
+
+        body.Children.Add(new TextBox
+        {
+            Text = "字幕文件: F:\\demo\\source.ass\n首选字体: Inter\n中文样例: 后备字体不应和 Skia 明显不一致",
+            AcceptsReturn = true,
+            Height = 86,
+            TextWrapping = TextWrapping.Wrap,
+            FontFamily = new FontFamily("Inter")
+        });
+
+        var options = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 12
+        };
+        options.Children.Add(new CheckBox { Content = "压缩字体名", IsChecked = true });
+        options.Children.Add(new CheckBox { Content = "保留 OpenType 特性", IsChecked = true });
+        options.Children.Add(new CheckBox { Content = "导出报告" });
+        body.Children.Add(options);
+
+        var log = new StackPanel { Spacing = 4 };
+        for (var i = 1; i <= 14; i++)
+        {
+            log.Children.Add(new TextBlock
+            {
+                Text = $"{i:00}  字体回退检查: Inter -> 中文字体，样例字符 后 字 幕 渲 染。",
+                FontFamily = new FontFamily("Inter"),
+                FontSize = 14
+            });
+        }
+
+        body.Children.Add(new Border
+        {
+            BorderBrush = new SolidColorBrush(Color.FromRgb(190, 198, 210)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(10),
+            Background = new SolidColorBrush(Color.FromRgb(248, 250, 252)),
+            Child = log
+        });
+
+        root.Children.Add(new ScrollViewer
+        {
+            VerticalScrollBarVisibility = ScrollBarVisibility.Visible,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Content = body
+        });
+
+        return root;
+    }
+}
+
+internal static class IReproMarker
+{
+    public static readonly Color MarkerColor = Color.FromRgb(255, 0, 255);
+}
+
+internal sealed class AssFontSubsetReproWindow : Window
+{
+    public AssFontSubsetReproWindow(int x, int y)
+    {
+        Title = "AssFontSubset Direct2D repro";
+        Width = 2880;
+        Height = 1747;
+        Position = new PixelPoint(x, y);
+        ShowActivated = true;
+        Topmost = true;
+        CanResize = false;
+        Background = Brushes.Black;
+        Content = CreateContent();
+    }
+
+    private static Control CreateContent()
+    {
+        var root = new Grid
+        {
+            Margin = new Thickness(16),
+            RowDefinitions = new RowDefinitions("Auto,*,Auto"),
+            RowSpacing = 12,
+            Background = Brushes.Black
+        };
+
+        var header = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnSpacing = 12
+        };
+        header.Children.Add(new StackPanel
+        {
+            Spacing = 4,
+            Children =
+            {
+                new TextBlock { Text = "AssFontSubset", FontSize = 22, FontWeight = FontWeight.SemiBold, Foreground = Brushes.White },
+                new TextBlock { Text = "就绪", Opacity = 0.72, Foreground = Brushes.White }
+            }
+        });
+
+        var headerButtons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        headerButtons.Children.Add(new Button { Content = "清空" });
+        headerButtons.Children.Add(new Button { Content = "开始", MinWidth = 112, IsEnabled = false, FontWeight = FontWeight.SemiBold });
+        Grid.SetColumn(headerButtons, 1);
+        header.Children.Add(headerButtons);
+        root.Children.Add(header);
+
+        var body = new Grid
+        {
+            RowDefinitions = new RowDefinitions("2*,Auto,Auto,Auto,Auto,Auto,3*"),
+            ColumnDefinitions = new ColumnDefinitions("150,*,Auto"),
+            RowSpacing = 10,
+            ColumnSpacing = 10
+        };
+        Grid.SetRow(body, 1);
+        root.Children.Add(body);
+
+        AddLabel(body, 0, "字幕文件");
+        var dropBorder = new Border
+        {
+            BorderBrush = new SolidColorBrush(Color.FromRgb(48, 48, 48)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Background = new SolidColorBrush(Color.FromRgb(38, 38, 38)),
+            Child = new Grid
+            {
+                RowDefinitions = new RowDefinitions("*,Auto"),
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = "将 .ass 文件拖到这里，或手动选择文件。",
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Foreground = Brushes.White
+                    },
+                    CreateAssFooter()
+                }
+            }
+        };
+        Grid.SetRow(dropBorder, 0);
+        Grid.SetColumn(dropBorder, 1);
+        Grid.SetColumnSpan(dropBorder, 2);
+        body.Children.Add(dropBorder);
+
+        AddPathRow(body, 1, "字体目录", "默认：第一个 ASS 文件同目录下的 fonts 文件夹");
+        AddPathRow(body, 2, "输出目录", "默认：第一个 ASS 文件同目录下的 output 文件夹");
+        AddPathRow(body, 3, "FontTools 目录", "可选：pyftsubset 和 ttx 所在目录");
+
+        AddLabel(body, 4, "后端");
+        var backends = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16, VerticalAlignment = VerticalAlignment.Center };
+        backends.Children.Add(new RadioButton { Content = "py", IsChecked = true, Foreground = Brushes.White });
+        backends.Children.Add(new RadioButton { Content = "居", Foreground = Brushes.White });
+        Grid.SetRow(backends, 4);
+        Grid.SetColumn(backends, 1);
+        Grid.SetColumnSpan(backends, 2);
+        body.Children.Add(backends);
+
+        AddLabel(body, 5, "选项");
+        var options = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 18, VerticalAlignment = VerticalAlignment.Center };
+        options.Children.Add(new CheckBox { Content = "居", IsChecked = true, Foreground = Brushes.White });
+        options.Children.Add(new CheckBox { Content = "调试", Foreground = Brushes.White });
+        Grid.SetRow(options, 5);
+        Grid.SetColumn(options, 1);
+        Grid.SetColumnSpan(options, 2);
+        body.Children.Add(options);
+
+        AddLabel(body, 6, "日志", top: true);
+        var logBox = new Border
+        {
+            BorderBrush = new SolidColorBrush(Color.FromRgb(48, 48, 48)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Child = new TextBox
+            {
+                Text = "",
+                IsReadOnly = true,
+                AcceptsReturn = true,
+                TextWrapping = TextWrapping.NoWrap,
+                FontFamily = new FontFamily("Consolas, Cascadia Mono, monospace"),
+                FontSize = 12,
+                BorderThickness = new Thickness(0)
+            }
+        };
+        Grid.SetRow(logBox, 6);
+        Grid.SetColumn(logBox, 1);
+        Grid.SetColumnSpan(logBox, 2);
+        body.Children.Add(logBox);
+
+        var progress = new ProgressBar
+        {
+            Height = 8,
+            Minimum = 0,
+            Maximum = 100,
+            Value = 0,
+            Background = new SolidColorBrush(IReproMarker.MarkerColor)
+        };
+        Grid.SetRow(progress, 2);
+        root.Children.Add(progress);
+
+        return root;
+    }
+
+    private static Grid CreateAssFooter()
+    {
+        var footer = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Margin = new Thickness(8, 0, 8, 8),
+            ColumnSpacing = 8
+        };
+        Grid.SetRow(footer, 1);
+        footer.Children.Add(new TextBlock { Text = "未选择 ASS 文件", Opacity = 0.72, VerticalAlignment = VerticalAlignment.Center, Foreground = Brushes.White });
+        var button = new Button { Content = "选择文件" };
+        Grid.SetColumn(button, 1);
+        footer.Children.Add(button);
+        return footer;
+    }
+
+    private static void AddLabel(Grid body, int row, string text, bool top = false)
+    {
+        var label = new TextBlock
+        {
+            Text = text,
+            FontWeight = FontWeight.SemiBold,
+            VerticalAlignment = top ? VerticalAlignment.Top : VerticalAlignment.Center,
+            Margin = top ? new Thickness(0, 7, 0, 0) : default,
+            Foreground = Brushes.White
+        };
+        Grid.SetRow(label, row);
+        Grid.SetColumn(label, 0);
+        body.Children.Add(label);
+    }
+
+    private static void AddPathRow(Grid body, int row, string label, string placeholder)
+    {
+        AddLabel(body, row, label);
+
+        var textBox = new TextBox
+        {
+            PlaceholderText = placeholder,
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+        Grid.SetRow(textBox, row);
+        Grid.SetColumn(textBox, 1);
+        body.Children.Add(textBox);
+
+        var button = new Button { Content = "浏览" };
+        Grid.SetRow(button, row);
+        Grid.SetColumn(button, 2);
+        body.Children.Add(button);
+    }
 }
 
 internal sealed class SmokeSurface : Control
@@ -319,11 +769,13 @@ internal static class SmokeAssets
     }
 }
 
-internal sealed record SmokeOptions(bool AutoExit, int MinFrames, TimeSpan Timeout, string OutputDirectory)
+internal sealed record SmokeOptions(bool AutoExit, int MinFrames, TimeSpan Timeout, string OutputDirectory, bool UiRepro, bool AfsRepro)
 {
     public static SmokeOptions Parse(string[] args)
     {
         var autoExit = args.Contains("--auto-exit", StringComparer.OrdinalIgnoreCase);
+        var uiRepro = args.Contains("--ui-repro", StringComparer.OrdinalIgnoreCase);
+        var afsRepro = args.Contains("--afs-repro", StringComparer.OrdinalIgnoreCase);
         var minFrames = GetInt(args, "--frames") ?? 12;
         var timeoutMs = GetInt(args, "--timeout-ms") ?? 8000;
         var outputDirectory = GetString(args, "--out") ??
@@ -333,7 +785,9 @@ internal sealed record SmokeOptions(bool AutoExit, int MinFrames, TimeSpan Timeo
             autoExit,
             minFrames,
             TimeSpan.FromMilliseconds(timeoutMs),
-            Path.GetFullPath(outputDirectory));
+            Path.GetFullPath(outputDirectory),
+            uiRepro || afsRepro,
+            afsRepro);
     }
 
     private static int? GetInt(string[] args, string name)
@@ -515,6 +969,26 @@ internal static class ScreenshotVerifier
 
     public static void VerifyImageBrushMarker(string path, string name) =>
         VerifyImageBrushMarker(path, name, 0, 0, int.MaxValue, int.MaxValue);
+
+    public static void VerifyBottomMarker(string path, Color markerColor)
+    {
+        using var bitmap = new Bitmap(path);
+        using var buffer = new VerifierFramebuffer(bitmap.PixelSize);
+        bitmap.CopyPixels(buffer);
+
+        var searchHeight = Math.Min(96, buffer.Size.Height);
+        if (!buffer.ContainsColor(
+                markerColor,
+                0,
+                buffer.Size.Height - searchHeight,
+                buffer.Size.Width,
+                searchHeight,
+                tolerance: 24,
+                minPixels: 24))
+        {
+            throw new InvalidOperationException($"The UI repro bottom marker was not rendered: {path}");
+        }
+    }
 
     public static void VerifyImageBrushMarker(string path, string name, int x, int y, int width, int height)
     {

@@ -22,7 +22,14 @@ namespace MIR.Direct2D1ForAvalonia.Media
     {
         private readonly ID2D1Bitmap1 _direct2DBitmap = d2DBitmap ?? throw new ArgumentNullException(nameof(d2DBitmap));
 
-        public override Vector Dpi => new Vector(96, 96);
+        public override Vector Dpi
+        {
+            get
+            {
+                var dpi = _direct2DBitmap.Dpi;
+                return new Vector(dpi.Width, dpi.Height);
+            }
+        }
         public override PixelSize PixelSize => _direct2DBitmap.PixelSize.ToAvalonia();
 
         public override void Dispose()
