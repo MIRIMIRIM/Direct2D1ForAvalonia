@@ -374,13 +374,35 @@ namespace MIR.Direct2D1ForAvalonia
         {
             public static readonly Direct2DGraphicsContext Instance = new();
 
+            // The Direct2D device context is thread-affine. We do not marshal calls here
+            // (Avalonia drives rendering from a single render thread), but in debug builds we
+            // remember the first thread that claimed the context and assert subsequent claims
+            // come from the same thread, so accidental cross-thread use surfaces immediately.
+            private int _ownerThreadId = -1;
+
             private Direct2DGraphicsContext()
             {
             }
 
             public bool IsLost => false;
 
-            public IDisposable EnsureCurrent() => Disposable.Empty;
+            public IDisposable EnsureCurrent()
+            {
+#if DEBUG
+                var current = Environment.CurrentManagedThreadId;
+                if (_ownerThreadId < 0)
+                {
+                    _ownerThreadId = current;
+                }
+                else if (_ownerThreadId != current)
+                {
+                    Debug.Fail(
+                        $"Direct2D device context accessed from thread {current} but is owned by thread {_ownerThreadId}. " +
+                        "Direct2D1 device contexts are thread-affine; ensure rendering happens on a single thread.");
+                }
+#endif
+                return Disposable.Empty;
+            }
 
             public object? TryGetFeature(Type featureType) => null;
 
