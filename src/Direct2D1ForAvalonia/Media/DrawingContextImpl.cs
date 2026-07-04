@@ -36,6 +36,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         private readonly Stack<ID2D1Layer?> _layers = new Stack<ID2D1Layer?>();
         private readonly Stack<BrushImpl?> _opacityMaskBrushes = new Stack<BrushImpl?>();
         private readonly Stack<ID2D1Layer> _layerPool = new Stack<ID2D1Layer>();
+        private readonly Stack<BitmapBlendingMode> _bitmapBlendModeStack = new Stack<BitmapBlendingMode>();
         private static readonly PropertyInfo? s_imageBrushBitmapProperty = typeof(IImageBrushSource).GetProperty(
             "Bitmap",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
@@ -247,16 +248,47 @@ namespace MIR.Direct2D1ForAvalonia.Media
             using (var d2d = ((BitmapImpl)source).GetDirect2DBitmap(_deviceContext))
             {
                 var interpolationMode = GetInterpolationMode(RenderOptions.BitmapInterpolationMode);
+                var compositeMode = GetCompositeMode(EffectiveBitmapBlendingMode);
 
-                // TODO: How to implement CompositeMode here?
+                // Vortice 3.8.3 does not expose the ID2D1DeviceContext::DrawBitmap overload
+                // that takes a composite mode. The default SourceOver path uses DrawBitmap
+                // directly (fast); any other composite mode routes through DrawImage, which
+                // does accept a composite mode. DrawImage draws at 1:1 with a target offset,
+                // so a scaling world transform is applied when destRect differs from sourceRect.
+                if (compositeMode == CompositeMode.SourceOver)
+                {
+                    _deviceContext.DrawBitmap(
+                        d2d.Value,
+                        destRect.ToVortice(),
+                        (float)opacity,
+                        interpolationMode,
+                        sourceRect.ToVortice(),
+                        null);
+                }
+                else
+                {
+                    var previousTransform = _deviceContext.Transform;
+                    try
+                    {
+                        var scaleX = (float)(sourceRect.Width > 0 ? destRect.Width / sourceRect.Width : 1);
+                        var scaleY = (float)(sourceRect.Height > 0 ? destRect.Height / sourceRect.Height : 1);
+                        var drawTransform = Matrix3x2.CreateScale(scaleX, scaleY)
+                            * Matrix3x2.CreateTranslation(new Vector2((float)destRect.X, (float)destRect.Y))
+                            * previousTransform;
+                        _deviceContext.Transform = drawTransform;
 
-                _deviceContext.DrawBitmap(
-                    d2d.Value,
-                    destRect.ToVortice(),
-                    (float)opacity,
-                    interpolationMode,
-                    sourceRect.ToVortice(),
-                    null);
+                        _deviceContext.DrawImage(
+                            d2d.Value,
+                            null,
+                            sourceRect.ToVortice(),
+                            interpolationMode,
+                            compositeMode);
+                    }
+                    finally
+                    {
+                        _deviceContext.Transform = previousTransform;
+                    }
+                }
             }
         }
 
@@ -835,14 +867,24 @@ namespace MIR.Direct2D1ForAvalonia.Media
             PopLayer();
         }
 
+        /// <summary>
+        /// The bitmap blending mode currently in effect. A pushed blend mode (via
+        /// <see cref="PushBitmapBlendMode"/> takes precedence; otherwise the per-draw
+        /// <see cref="RenderOptions.BitmapBlendingMode"/> is used.
+        /// </summary>
+        private BitmapBlendingMode EffectiveBitmapBlendingMode
+            => _bitmapBlendModeStack.Count > 0
+                ? _bitmapBlendModeStack.Peek()
+                : RenderOptions.BitmapBlendingMode;
+
         public void PushBitmapBlendMode(BitmapBlendingMode blendingMode)
         {
-            // TODO: Stubs for now
+            _bitmapBlendModeStack.Push(blendingMode);
         }
 
         public void PopBitmapBlendMode()
         {
-            // TODO: Stubs for now
+            _bitmapBlendModeStack.Pop();
         }
 
         public void PushOpacityMask(IBrush mask, Rect bounds)
