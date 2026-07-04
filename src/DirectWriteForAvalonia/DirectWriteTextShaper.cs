@@ -57,6 +57,12 @@ namespace MIR.DirectWriteForAvalonia
                 return new ShapedBuffer(text, 0, options.GlyphTypeface, options.FontRenderingEmSize, options.BidiLevel);
 
             var textString = TryGetString(text) ?? span.ToString();
+            // Rewrite a trailing line-break to ZWNJ before shaping so it becomes zero-width,
+            // matching upstream HarfBuzzTextShaper.MergeBreakPair. Done before AnalyzeRuns so
+            // the same text feeds analysis and GetGlyphs/GetGlyphPlacements.
+            var merged = MergeTrailingLineBreak(textString.AsSpan());
+            if (merged is not null)
+                textString = merged;
             var culture = options.Culture ?? CultureInfo.CurrentCulture;
             var locale = string.IsNullOrWhiteSpace(culture.Name) ? CultureInfo.CurrentUICulture.Name : culture.Name;
 
@@ -234,13 +240,6 @@ namespace MIR.DirectWriteForAvalonia
                         advance = options.IncrementalTabWidth > 0
                             ? (float)options.IncrementalTabWidth
                             : (float)(4 * GetGlyphAdvance(typeface, glyphId) * (options.FontRenderingEmSize / typeface.Metrics.DesignEmHeight));
-                        dx = 0;
-                        dy = 0;
-                    }
-                    else if (cluster >= 0 && cluster < span.Length && new Codepoint(span[cluster]).IsBreakChar)
-                    {
-                        glyphId = GetSpaceGlyph(typeface);
-                        advance = 0;
                         dx = 0;
                         dy = 0;
                     }
@@ -498,13 +497,6 @@ namespace MIR.DirectWriteForAvalonia
                     dx = 0;
                     dy = 0;
                 }
-                else if (localCluster >= 0 && localCluster < runText.Length && new Codepoint(runText[localCluster]).IsBreakChar)
-                {
-                    glyphId = GetSpaceGlyph(typeface);
-                    advance = 0;
-                    dx = 0;
-                    dy = 0;
-                }
 
                 output.Add(new GlyphInfo(glyphId, cluster, advance, new Vector(dx, dy)));
             }
@@ -652,7 +644,11 @@ namespace MIR.DirectWriteForAvalonia
             var typeface = options.GlyphTypeface;
             var span = text.Span;
 
-            var glyphCount = CountScalars(span);
+            // Rewrite a trailing line-break to ZWNJ before shaping (see ShapeWithDirectWrite).
+            var merged = MergeTrailingLineBreak(span);
+            ReadOnlySpan<char> effective = merged is not null ? merged.AsSpan() : span;
+
+            var glyphCount = CountScalars(effective);
             var shaped = new ShapedBuffer(text, glyphCount, typeface, options.FontRenderingEmSize, options.BidiLevel);
 
             var scale = typeface.Metrics.DesignEmHeight > 0
@@ -663,10 +659,10 @@ namespace MIR.DirectWriteForAvalonia
 
             var i = 0;
             var outIndex = 0;
-            while (i < span.Length)
+            while (i < effective.Length)
             {
                 var cluster = i;
-                var codepoint = Codepoint.ReadAt(span, i, out var consumed);
+                var codepoint = Codepoint.ReadAt(effective, i, out var consumed);
                 i += consumed;
 
                 var glyphId = GetGlyph(typeface, codepoint);
@@ -679,12 +675,6 @@ namespace MIR.DirectWriteForAvalonia
                     advance = options.IncrementalTabWidth > 0
                         ? options.IncrementalTabWidth
                         : 4 * GetGlyphAdvance(typeface, glyphId) * scale;
-                    offset = default;
-                }
-                else if (codepoint.IsBreakChar)
-                {
-                    glyphId = GetSpaceGlyph(typeface);
-                    advance = 0;
                     offset = default;
                 }
 
@@ -725,6 +715,41 @@ namespace MIR.DirectWriteForAvalonia
 
         private static ushort GetSpaceGlyph(GlyphTypeface typeface)
             => typeface.CharacterToGlyphMap.TryGetGlyph(' ', out var glyph) ? glyph : (ushort)0;
+
+        /// <summary>
+        /// Mirrors upstream <c>HarfBuzzTextShaper.MergeBreakPair</c>: rewrites a trailing
+        /// line-break sequence to ZWNJ (\u200C) so the shaper emits a zero-width glyph for
+        /// it. Only the trailing break is rewritten; break characters elsewhere are shaped
+        /// as-is (matching upstream behavior, where the text formatter splits text at line
+        /// breaks before shaping, so a shaper only ever sees a trailing break in practice).
+        /// Returns null when no rewrite is needed so the caller can keep its zero-copy
+        /// reference to the original string.
+        /// </summary>
+        private static string? MergeTrailingLineBreak(ReadOnlySpan<char> span)
+        {
+            if (span.Length == 0 || !new Codepoint(span[^1]).IsBreakChar)
+                return null;
+
+            // A trailing "\r\n" pair (CRLF) is rewritten as two ZWNJs, matching MergeBreakPair.
+            var pairStart = span.Length >= 2
+                && span[^2] == '\r'
+                && span[^1] == '\n';
+
+            var chars = new char[span.Length];
+            span.CopyTo(chars);
+
+            if (pairStart)
+            {
+                chars[^2] = '\u200C';
+                chars[^1] = '\u200C';
+            }
+            else
+            {
+                chars[^1] = '\u200C';
+            }
+
+            return new string(chars);
+        }
 
         private static ushort GetGlyphAdvance(GlyphTypeface typeface, ushort glyphId)
         {

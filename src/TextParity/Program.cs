@@ -431,10 +431,11 @@ internal static class Program
             // A zero-width glyph (advance within epsilon on both sides) is invisible and
             // cannot host a caret, so its glyph id and cluster are irrelevant to rendering
             // and text navigation. Only compare glyph id and cluster when at least one side
-            // is non-zero-width. This lets line-break characters pass parity: DirectWrite
-            // emits the space glyph at zero advance, while the HarfBuzz baseline rewrites
-            // them to ZWNJ (and merges the CRLF cluster) before shaping. Visible glyphs
-            // (e.g. tabs) still require an exact id and cluster match.
+            // is non-zero-width. This lets trailing line-break characters pass parity: both
+            // shapers rewrite them to ZWNJ (zero advance), but the HarfBuzz baseline also
+            // merges the CRLF pair into one cluster, while DirectWrite keeps two clusters.
+            // Visible glyphs (e.g. tabs and middle line breaks) still require exact id and
+            // cluster matches.
             var significant = Math.Abs(dwAdvance) > epsilon || Math.Abs(hbAdvance) > epsilon;
 
             if ((significant && dw.GlyphIndex != hb.GlyphIndex)
@@ -486,6 +487,7 @@ internal static class Program
             new TestCase("Line Break LF", "AB\n", "segoeui.ttf", CaseTier.Tier1),
             new TestCase("Line Break CRLF", "AB\r\n", "segoeui.ttf", CaseTier.Tier1),
             new TestCase("Line Break CR", "AB\r", "segoeui.ttf", CaseTier.Tier1),
+            new TestCase("Mid Break CRLF", "Line1\r\nLine2", "segoeui.ttf", CaseTier.Tier2),
             new TestCase("CJK Chinese", "你好世界", "msyh.ttc", CaseTier.Tier1, Culture: "zh-CN"),
             new TestCase("CJK Japanese", "こんにちは世界", "msgothic.ttc", CaseTier.Tier1, Culture: "ja-JP"),
             new TestCase("CJK Korean", "안녕하세요 세계", "malgun.ttf", CaseTier.Tier1, Culture: "ko-KR"),
