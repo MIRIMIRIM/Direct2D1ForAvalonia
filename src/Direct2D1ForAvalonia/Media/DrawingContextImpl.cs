@@ -132,12 +132,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
             }
         }
 
-        public Matrix4x4 Transform4x4
-        {
-            get => throw new NotSupportedException();
-            set => throw new NotSupportedException();
-        }
-
         public RenderOptions RenderOptions
         {
             get => _renderOptions;
