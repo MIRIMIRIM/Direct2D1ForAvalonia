@@ -101,16 +101,41 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <inheritdoc />
         public bool TryGetPointAndTangentAtDistance(double distance, out Point point, out Point tangent)
         {
-            // Direct2D doesnt have this sadly.
-            Logger.TryGet(LogEventLevel.Warning, LogArea.Visual)?.Log(this, "TryGetPointAndTangentAtDistance is not available in Direct2D.");
-            point = new Point();
-            tangent = new Point();
-            return false;
+            // The native ID2D1Geometry::ComputePointAtLength exposes a unit-tangent output,
+            // but Vortice's binding drops it (it only returns the point). Approximate the
+            // tangent by differencing two points straddling the requested length. The step is
+            // tiny relative to ContourApproximation so the result is effectively the unit
+            // tangent for smooth segments.
+            Geometry.ComputePointAtLength((float)distance, ContourApproximation, out var p);
+            point = new Point(p.X, p.Y);
+
+            const float tangentEpsilon = 0.001f;
+            Geometry.ComputePointAtLength((float)(distance + tangentEpsilon), ContourApproximation, out var pNext);
+
+            var dx = pNext.X - p.X;
+            var dy = pNext.Y - p.Y;
+            var len = Math.Sqrt((dx * dx) + (dy * dy));
+            if (len < float.Epsilon)
+            {
+                // Degenerate (end of contour or cusp): fall back to the previous point so the
+                // direction is still meaningful when the forward difference vanishes.
+                Geometry.ComputePointAtLength((float)Math.Max(distance - tangentEpsilon, 0), ContourApproximation, out var pPrev);
+                dx = p.X - pPrev.X;
+                dy = p.Y - pPrev.Y;
+                len = Math.Sqrt((dx * dx) + (dy * dy));
+            }
+
+            tangent = len >= float.Epsilon ? new Point(dx / len, dy / len) : new Point(1, 0);
+            return true;
         }
 
         public bool TryGetSegment(double startDistance, double stopDistance, bool startOnBeginFigure, out IGeometryImpl segmentGeometry)
         {
-            // Direct2D doesnt have this too sadly.
+            // Direct2D has no path-slicing primitive, and Vortice exposes nothing close to it.
+            // The only route would be to walk the contour at fine increments and rebuild a
+            // polyline, which loses curve information and produces visibly faceted output for
+            // Bezier segments. Returning false lets callers (dashed strokes, path trimming)
+            // apply their own fallback rather than render an incorrect angular approximation.
             Logger.TryGet(LogEventLevel.Warning, LogArea.Visual)?.Log(this, "TryGetSegment is not available in Direct2D.");
 
             segmentGeometry = null!;

@@ -102,7 +102,65 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public Rect Bounds { get; }
 
-        public IReadOnlyList<float> GetIntersections(float lowerBound, float upperBound) => Array.Empty<float>();
+        public IReadOnlyList<float> GetIntersections(float lowerBound, float upperBound)
+        {
+            // Used by text decoration (underline/strikethrough) to gap the line where it
+            // crosses glyph bodies. The returned values are paired x-coordinates delimiting
+            // spans where the glyph outline is filled within the [lowerBound, upperBound]
+            // horizontal band. Skia exposes this as SKTextBlob.GetIntercepts; Direct2D has no
+            // equivalent, so extract the combined glyph outline as a path geometry and run a
+            // horizontal scan-line across the band using FillContainsPoint.
+            if (_glyphIndices.Length == 0 || upperBound <= lowerBound)
+                return Array.Empty<float>();
+
+            using var pathGeometry = Direct2D1Platform.Direct2D1Factory.CreatePathGeometry();
+            using (var sink = pathGeometry.Open())
+            {
+                _glyphTypefaceImpl.FontFace.GetGlyphRunOutline(
+                    (float)FontRenderingEmSize,
+                    _glyphIndices,
+                    _glyphAdvances,
+                    _glyphOffsets,
+                    false,
+                    false,
+                    sink);
+                sink.Close();
+            }
+
+            var b = pathGeometry.GetBounds();
+            var midY = (lowerBound + upperBound) * 0.5f + (float)BaselineOrigin.Y;
+            var left = b.Left;
+            var right = b.Right;
+            var bandWidth = right - left;
+            if (bandWidth <= 0)
+                return Array.Empty<float>();
+
+            // Sample the fill at a sub-pixel pitch across the glyph width. The intersection
+            // edges are resolved to the sample grid, which is fine for decoration gaps.
+            const float samplePitch = 0.5f;
+            var sampleCount = (int)Math.Ceiling(bandWidth / samplePitch) + 1;
+
+            var intersections = new List<float>();
+            var inside = false;
+            for (var i = 0; i < sampleCount; i++)
+            {
+                var x = left + i * samplePitch;
+                var filled = pathGeometry.FillContainsPoint(new System.Numerics.Vector2(x, midY));
+                if (filled != inside)
+                {
+                    intersections.Add(x - (float)BaselineOrigin.X);
+                    inside = filled;
+                }
+            }
+
+            if (inside)
+            {
+                // Close an open trailing span so callers always see paired boundaries.
+                intersections.Add(right - (float)BaselineOrigin.X);
+            }
+
+            return intersections;
+        }
 
         public void Dispose()
         {
