@@ -8,6 +8,7 @@ using Avalonia;
 using Avalonia.Media;
 using Avalonia.Media.Fonts;
 using Avalonia.Media.TextFormatting;
+using Avalonia.Media.TextFormatting.Unicode;
 using Avalonia.Platform;
 using SharpGen.Runtime;
 using Vortice.DirectWrite;
@@ -651,24 +652,14 @@ namespace MIR.DirectWriteForAvalonia
             while (i < span.Length)
             {
                 var cluster = i;
-                var c = span[i];
-                var codepoint = (int)c;
-                var consumed = 1;
-                if (char.IsHighSurrogate(c)
-                    && i + 1 < span.Length
-                    && char.IsLowSurrogate(span[i + 1]))
-                {
-                    codepoint = char.ConvertToUtf32(c, span[i + 1]);
-                    consumed = 2;
-                }
-
+                var codepoint = Codepoint.ReadAt(span, i, out var consumed);
                 i += consumed;
 
                 var glyphId = GetGlyph(typeface, codepoint);
                 var offset = default(Vector);
                 var advance = GetGlyphAdvance(typeface, glyphId) * scale + options.LetterSpacing;
 
-                if (codepoint == '\t')
+                if ((int)codepoint == '\t')
                 {
                     glyphId = GetSpaceGlyph(typeface);
                     advance = options.IncrementalTabWidth > 0
