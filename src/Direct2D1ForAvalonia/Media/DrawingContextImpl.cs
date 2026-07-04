@@ -217,6 +217,22 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 }
                 finally
                 {
+                    // Drain any layers/masks left pushed by a render that aborted before matching
+                    // pops (e.g. an exception between PushOpacity/OpacityMask and its pop). Layers
+                    // here are still live RCWs (the pool only holds returned ones), and mask brushes
+                    // own their own D2D brush, so dispose both before tearing down the device.
+                    foreach (var layer in _layers)
+                    {
+                        layer?.Dispose();
+                    }
+                    _layers.Clear();
+
+                    foreach (var maskBrush in _opacityMaskBrushes)
+                    {
+                        maskBrush?.Dispose();
+                    }
+                    _opacityMaskBrushes.Clear();
+
                     if (_ownsDeviceContext)
                     {
                         _deviceContext.Dispose();
