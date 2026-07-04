@@ -723,7 +723,8 @@ namespace MIR.DirectWriteForAvalonia
             return typeface.CharacterToGlyphMap[codepoint];
         }
 
-        private static ushort GetSpaceGlyph(GlyphTypeface typeface) => GetGlyph(typeface, ' ');
+        private static ushort GetSpaceGlyph(GlyphTypeface typeface)
+            => typeface.CharacterToGlyphMap.TryGetGlyph(' ', out var glyph) ? glyph : (ushort)0;
 
         private static ushort GetGlyphAdvance(GlyphTypeface typeface, ushort glyphId)
         {
