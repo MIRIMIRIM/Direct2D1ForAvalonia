@@ -3,6 +3,7 @@ using System.IO;
 using Avalonia.Platform;
 using MIR.Direct2D1ForAvalonia.Diagnostics;
 using Vortice.Direct2D1;
+using Vortice.WIC;
 
 namespace MIR.Direct2D1ForAvalonia.Media.Imaging
 {
@@ -68,7 +69,7 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
             return new OptionalDispose<ID2D1Bitmap1>(GetBitmap(_renderTarget), true);
         }
 
-        public override void Save(Stream stream, int? quality = null)
+        protected internal override void Save(Stream stream, ContainerFormat containerFormat, int? quality)
         {
             using (var wic = new WicRenderTargetBitmapImpl(PixelSize, Dpi))
             {
@@ -81,7 +82,7 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
                         new Rect(PixelSize.ToSizeWithDpi(Dpi)));
                 }
 
-                wic.Save(stream);
+                wic.Save(stream, containerFormat, quality);
             }
         }
 

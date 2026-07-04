@@ -263,9 +263,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
             return new OptionalDispose<ID2D1Bitmap1>(d2dBitmap, true);
         }
 
-        public override void Save(Stream stream, int? quality = null)
+        protected internal override void Save(Stream stream, ContainerFormat containerFormat, int? quality)
         {
-            using (var encoder = Direct2D1Platform.ImagingFactory.CreateEncoder(ContainerFormat.Png, stream))
+            using (var encoder = Direct2D1Platform.ImagingFactory.CreateEncoder(containerFormat, stream))
             using (var frame = encoder.CreateNewFrame(out var props))
             {
                 frame.Initialize(props);
