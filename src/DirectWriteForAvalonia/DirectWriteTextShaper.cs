@@ -237,6 +237,13 @@ namespace MIR.DirectWriteForAvalonia
                         dx = 0;
                         dy = 0;
                     }
+                    else if (cluster >= 0 && cluster < span.Length && new Codepoint(span[cluster]).IsBreakChar)
+                    {
+                        glyphId = GetSpaceGlyph(typeface);
+                        advance = 0;
+                        dx = 0;
+                        dy = 0;
+                    }
 
                     shaped[i] = new GlyphInfo(glyphId, cluster, advance, new Vector(dx, dy));
                 }
@@ -491,6 +498,13 @@ namespace MIR.DirectWriteForAvalonia
                     dx = 0;
                     dy = 0;
                 }
+                else if (localCluster >= 0 && localCluster < runText.Length && new Codepoint(runText[localCluster]).IsBreakChar)
+                {
+                    glyphId = GetSpaceGlyph(typeface);
+                    advance = 0;
+                    dx = 0;
+                    dy = 0;
+                }
 
                 output.Add(new GlyphInfo(glyphId, cluster, advance, new Vector(dx, dy)));
             }
@@ -665,6 +679,12 @@ namespace MIR.DirectWriteForAvalonia
                     advance = options.IncrementalTabWidth > 0
                         ? options.IncrementalTabWidth
                         : 4 * GetGlyphAdvance(typeface, glyphId) * scale;
+                    offset = default;
+                }
+                else if (codepoint.IsBreakChar)
+                {
+                    glyphId = GetSpaceGlyph(typeface);
+                    advance = 0;
                     offset = default;
                 }
 
