@@ -8,11 +8,13 @@ namespace MIR.Direct2D1ForAvalonia.Media
     /// </summary>
     internal class StreamGeometryImpl : GeometryImpl, IStreamGeometryImpl
     {
+        private protected readonly ID2D1PathGeometry _pathGeometry;
+
         /// <summary>
         /// Initializes a new instance of the <see cref="StreamGeometryImpl"/> class.
         /// </summary>
         public StreamGeometryImpl()
-            : base(CreateGeometry())
+            : this(CreateGeometry())
         {
         }
 
@@ -23,6 +25,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         public StreamGeometryImpl(ID2D1PathGeometry geometry)
             : base(geometry)
         {
+            _pathGeometry = geometry;
         }
 
         /// <inheritdoc/>
@@ -31,7 +34,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             var result = Direct2D1Platform.Direct2D1Factory.CreatePathGeometry();
             using (var sink = result.Open())
             {
-                Geometry.QueryInterface<ID2D1PathGeometry>().Stream(sink);
+                _pathGeometry.Stream(sink);
                 sink.Close();
             }
 
@@ -41,7 +44,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <inheritdoc/>
         public IStreamGeometryContextImpl Open()
         {
-            return new StreamGeometryContextImpl(Geometry.QueryInterface<ID2D1PathGeometry>().Open());
+            return new StreamGeometryContextImpl(_pathGeometry.Open());
         }
 
         private static ID2D1PathGeometry CreateGeometry()

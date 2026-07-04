@@ -12,7 +12,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// </summary>
         public LineGeometryImpl(Point p1, Point p2)
         {
-            using (var sink = Geometry.QueryInterface<ID2D1PathGeometry>().Open())
+            using (var sink = _pathGeometry.Open())
             {
                 sink.BeginFigure(p1.ToVortice(), FigureBegin.Hollow);
                 sink.AddLine(p2.ToVortice());

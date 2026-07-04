@@ -5,6 +5,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
 {
     internal class TransformedGeometryImpl : GeometryImpl, ITransformedGeometryImpl
     {
+        private readonly ID2D1TransformedGeometry _transformedGeometry;
+
         /// <summary>
         /// Initializes a new instance of the <see cref="StreamGeometryImpl"/> class.
         /// </summary>
@@ -13,14 +15,15 @@ namespace MIR.Direct2D1ForAvalonia.Media
         public TransformedGeometryImpl(ID2D1TransformedGeometry geometry, GeometryImpl source)
             : base(geometry)
         {
+            _transformedGeometry = geometry;
             SourceGeometry = source;
         }
 
         public IGeometryImpl SourceGeometry { get; }
 
         /// <inheritdoc/>
-        public Matrix Transform => Geometry.QueryInterface<ID2D1TransformedGeometry>().Transform.ToAvalonia();
+        public Matrix Transform => _transformedGeometry.Transform.ToAvalonia();
 
-        protected override ID2D1Geometry GetSourceGeometry() => Geometry.QueryInterface<ID2D1TransformedGeometry>().SourceGeometry;
+        protected override ID2D1Geometry GetSourceGeometry() => _transformedGeometry.SourceGeometry;
     }
 }
