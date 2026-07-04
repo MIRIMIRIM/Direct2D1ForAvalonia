@@ -21,6 +21,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             return interpolationMode switch
             {
                 Avalonia.Media.Imaging.BitmapInterpolationMode.Unspecified => BitmapInterpolationMode.Fant,
+                Avalonia.Media.Imaging.BitmapInterpolationMode.None => BitmapInterpolationMode.NearestNeighbor,
                 Avalonia.Media.Imaging.BitmapInterpolationMode.LowQuality => BitmapInterpolationMode.NearestNeighbor,
                 Avalonia.Media.Imaging.BitmapInterpolationMode.MediumQuality => BitmapInterpolationMode.Fant,
                 _ => BitmapInterpolationMode.HighQualityCubic,
@@ -46,6 +47,32 @@ namespace MIR.Direct2D1ForAvalonia.Media
         {
             WicImpl = bmp;
             Dpi = new Vector(96, 96);
+            SetFormatFromWic(WicImpl.PixelFormat);
+        }
+
+        /// <summary>
+        /// Initializes a resized copy of an existing WIC-backed bitmap using a WIC scaler.
+        /// </summary>
+        /// <param name="source">The source bitmap to scale.</param>
+        /// <param name="destinationSize">The desired pixel dimensions.</param>
+        /// <param name="interpolationMode">The interpolation mode to apply.</param>
+        internal WicBitmapImpl(WicBitmapImpl source, PixelSize destinationSize, Avalonia.Media.Imaging.BitmapInterpolationMode interpolationMode)
+        {
+            Dpi = source.Dpi;
+
+            if (source.PixelSize == destinationSize)
+            {
+                WicImpl = Direct2D1Platform.ImagingFactory.CreateBitmapFromSource(source.WicImpl, BitmapCreateCacheOption.CacheOnLoad);
+            }
+            else
+            {
+                using (var scaler = Direct2D1Platform.ImagingFactory.CreateBitmapScaler())
+                {
+                    scaler.Initialize(source.WicImpl, (uint)destinationSize.Width, (uint)destinationSize.Height, ConvertInterpolationMode(interpolationMode));
+                    WicImpl = Direct2D1Platform.ImagingFactory.CreateBitmapFromSource(scaler, BitmapCreateCacheOption.CacheOnLoad);
+                }
+            }
+
             SetFormatFromWic(WicImpl.PixelFormat);
         }
 

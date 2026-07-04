@@ -345,8 +345,11 @@ namespace MIR.Direct2D1ForAvalonia
         /// <inheritdoc />
         public IBitmapImpl ResizeBitmap(IBitmapImpl bitmapImpl, PixelSize destinationSize, BitmapInterpolationMode interpolationMode = BitmapInterpolationMode.HighQuality)
         {
-            // https://github.com/sharpdx/SharpDX/issues/959 blocks implementation.
-            throw new NotImplementedException();
+            // The old SharpDX blocker no longer applies on Vortice; WIC exposes the scaler.
+            if (bitmapImpl is WicBitmapImpl wic)
+                return new WicBitmapImpl(wic, destinationSize, interpolationMode);
+
+            throw new NotSupportedException("ResizeBitmap requires a WIC-backed bitmap.");
         }
 
         /// <inheritdoc />
