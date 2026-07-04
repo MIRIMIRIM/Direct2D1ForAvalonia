@@ -428,8 +428,17 @@ internal static class Program
             var dwAdvance = rtl ? Math.Abs(dw.GlyphAdvance) : dw.GlyphAdvance;
             var hbAdvance = rtl ? Math.Abs(hb.GlyphAdvance) : hb.GlyphAdvance;
 
-            if (dw.GlyphIndex != hb.GlyphIndex
-                || dw.GlyphCluster != hb.GlyphCluster
+            // A zero-width glyph (advance within epsilon on both sides) is invisible and
+            // cannot host a caret, so its glyph id and cluster are irrelevant to rendering
+            // and text navigation. Only compare glyph id and cluster when at least one side
+            // is non-zero-width. This lets line-break characters pass parity: DirectWrite
+            // emits the space glyph at zero advance, while the HarfBuzz baseline rewrites
+            // them to ZWNJ (and merges the CRLF cluster) before shaping. Visible glyphs
+            // (e.g. tabs) still require an exact id and cluster match.
+            var significant = Math.Abs(dwAdvance) > epsilon || Math.Abs(hbAdvance) > epsilon;
+
+            if ((significant && dw.GlyphIndex != hb.GlyphIndex)
+                || (significant && dw.GlyphCluster != hb.GlyphCluster)
                 || Math.Abs(dwAdvance - hbAdvance) > epsilon
                 || Math.Abs(dw.OffsetX - hb.OffsetX) > epsilon
                 || Math.Abs(dw.OffsetY - hb.OffsetY) > epsilon)
@@ -474,6 +483,9 @@ internal static class Program
                 CaseTier.Tier1,
                 Features: [AvaloniaFontFeature.Parse("kern=0")]),
             new TestCase("Tab Behavior", "A\tB", "segoeui.ttf", CaseTier.Tier1),
+            new TestCase("Line Break LF", "AB\n", "segoeui.ttf", CaseTier.Tier1),
+            new TestCase("Line Break CRLF", "AB\r\n", "segoeui.ttf", CaseTier.Tier1),
+            new TestCase("Line Break CR", "AB\r", "segoeui.ttf", CaseTier.Tier1),
             new TestCase("CJK Chinese", "你好世界", "msyh.ttc", CaseTier.Tier1, Culture: "zh-CN"),
             new TestCase("CJK Japanese", "こんにちは世界", "msgothic.ttc", CaseTier.Tier1, Culture: "ja-JP"),
             new TestCase("CJK Korean", "안녕하세요 세계", "malgun.ttf", CaseTier.Tier1, Culture: "ko-KR"),
