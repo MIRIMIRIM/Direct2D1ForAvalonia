@@ -37,6 +37,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
         private readonly Stack<BrushImpl?> _opacityMaskBrushes = new Stack<BrushImpl?>();
         private readonly Stack<ID2D1Layer> _layerPool = new Stack<ID2D1Layer>();
         private readonly Stack<BitmapBlendingMode> _bitmapBlendModeStack = new Stack<BitmapBlendingMode>();
+        // For each PushClip, records the kind of clip pushed so PopClip can undo the right one.
+        // When the entry is a non-null geometry, the clip was a rounded-rect layer whose
+        // geometric mask must outlive the layer and be disposed alongside it on PopClip.
+        private readonly Stack<ID2D1Geometry?> _clipKindStack = new Stack<ID2D1Geometry?>();
         private static readonly PropertyInfo? s_imageBrushBitmapProperty = typeof(IImageBrushSource).GetProperty(
             "Bitmap",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
@@ -165,6 +169,14 @@ namespace MIR.Direct2D1ForAvalonia.Media
             {
                 layer.Dispose();
             }
+
+            // Clean up any rounded-rect clip geometries left behind by a PushClip without a
+            // matching PopClip (e.g. render aborted mid-frame).
+            foreach (var clipGeometry in _clipKindStack)
+            {
+                clipGeometry?.Dispose();
+            }
+            _clipKindStack.Clear();
 
             try
             {
@@ -600,13 +612,56 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <returns>A disposable used to undo the clip rectangle.</returns>
         public void PushClip(Rect clip)
         {
+            _clipKindStack.Push(null);
             _deviceContext.PushAxisAlignedClip(clip.ToVortice(), AntialiasMode.PerPrimitive);
         }
 
         public void PushClip(RoundedRect clip)
         {
-            //TODO: radius
-            _deviceContext.PushAxisAlignedClip(clip.Rect.ToDirect2D(), AntialiasMode.PerPrimitive);
+            var radiusX = Math.Max(clip.RadiiTopLeft.X,
+                Math.Max(clip.RadiiTopRight.X, Math.Max(clip.RadiiBottomRight.X, clip.RadiiBottomLeft.X)));
+            var radiusY = Math.Max(clip.RadiiTopLeft.Y,
+                Math.Max(clip.RadiiTopRight.Y, Math.Max(clip.RadiiBottomRight.Y, clip.RadiiBottomLeft.Y)));
+
+            if (radiusX <= 0 || radiusY <= 0)
+            {
+                // No rounding: a plain axis-aligned clip is cheaper and exactly equivalent.
+                _clipKindStack.Push(null);
+                _deviceContext.PushAxisAlignedClip(clip.Rect.ToDirect2D(), AntialiasMode.PerPrimitive);
+                return;
+            }
+
+            // Direct2D has no native rounded-rect clip; push a layer whose geometric mask is
+            // a rounded-rectangle geometry so the clip honors the corner radii. The geometry
+            // must stay alive until PopClip, so it is tracked in the clip-kind stack.
+            var geometry = Direct2D1Platform.Direct2D1Factory.CreateRoundedRectangleGeometry(
+                new RoundedRectangle
+                {
+                    Rect = clip.Rect.ToDirect2D(),
+                    RadiusX = (float)radiusX,
+                    RadiusY = (float)radiusY
+                });
+
+            var parameters = new LayerParameters
+            {
+                ContentBounds = clip.Rect.ToDirect2D(),
+                MaskTransform = Matrix3x2.Identity,
+                Opacity = 1,
+                GeometricMask = geometry,
+                MaskAntialiasMode = AntialiasMode.PerPrimitive
+            };
+
+            try
+            {
+                PushDirect2DLayer(parameters);
+            }
+            catch
+            {
+                geometry.Dispose();
+                throw;
+            }
+
+            _clipKindStack.Push(geometry);
         }
 
         public void PushClip(IPlatformRenderInterfaceRegion region)
@@ -616,7 +671,16 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void PopClip()
         {
-            _deviceContext.PopAxisAlignedClip();
+            var geometry = _clipKindStack.Pop();
+            if (geometry is null)
+            {
+                _deviceContext.PopAxisAlignedClip();
+            }
+            else
+            {
+                PopLayer();
+                geometry.Dispose();
+            }
         }
 
         public void PushLayer(Rect bounds)
