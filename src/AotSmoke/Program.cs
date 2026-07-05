@@ -55,6 +55,39 @@ internal static class OffscreenSmoke
                 null,
                 new RoundedRect(new Rect(12, 52, 232, 54), 12));
 
+            context.DrawRectangle(
+                new ConicGradientBrush
+                {
+                    Center = RelativePoint.Center,
+                    GradientStops =
+                    {
+                        new GradientStop(Color.FromRgb(230, 70, 70), 0),
+                        new GradientStop(Color.FromRgb(255, 220, 80), 0.33),
+                        new GradientStop(Color.FromRgb(80, 170, 240), 0.66),
+                        new GradientStop(Color.FromRgb(230, 70, 70), 1)
+                    }
+                },
+                null,
+                new RoundedRect(new Rect(156, 76, 40, 34), 8));
+
+            context.DrawRectangle(
+                new SolidColorBrush(Color.FromRgb(255, 248, 210)),
+                null,
+                new RoundedRect(new Rect(84, 78, 54, 28), 7),
+                new BoxShadows(new BoxShadow
+                {
+                    OffsetX = 5,
+                    OffsetY = 4,
+                    Blur = 8,
+                    Spread = 1,
+                    Color = Color.FromArgb(120, 20, 32, 48)
+                }));
+
+            var path = Geometry.Parse("M 14,122 C 54,82 104,134 146,96");
+            if (!path.TryGetSegment(12, 100, true, out var segment))
+                throw new InvalidOperationException("Geometry.TryGetSegment returned false in offscreen smoke.");
+            context.DrawGeometry(null, new Pen(Brushes.Black, 2), segment);
+
             var text = new FormattedText(
                 "AOT Direct2D",
                 CultureInfo.InvariantCulture,
@@ -400,7 +433,7 @@ internal sealed class UiReproWindow : Window
 
         body.Children.Add(new TextBox
         {
-            Text = "字幕文件: F:\\demo\\source.ass\n首选字体: Inter\n中文样例: 后备字体不应和 Skia 明显不一致",
+            Text = "字幕文件: source.ass\n首选字体: Inter\n中文样例: 后备字体不应和 Skia 明显不一致",
             AcceptsReturn = true,
             Height = 86,
             TextWrapping = TextWrapping.Wrap,
