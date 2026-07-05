@@ -122,7 +122,51 @@ internal static class OffscreenSmoke
         ScreenshotVerifier.VerifyImageBrushMarker(outputPath, "offscreen image brush", 196, 16, 48, 32);
         ScreenshotVerifier.VerifyImageBrushMarker(outputPath, "offscreen transformed image brush", 40, 108, 16, 16);
         VerifyJpegQuality(bitmap, options.OutputDirectory);
+        RunEdgeCaseSmoke(options.OutputDirectory);
         Console.WriteLine($"Offscreen smoke passed. screenshot={outputPath}");
+    }
+
+    private static void RunEdgeCaseSmoke(string outputDirectory)
+    {
+        using var bitmap = new RenderTargetBitmap(new PixelSize(160, 96), new Vector(96, 96));
+        using (var context = bitmap.CreateDrawingContext(false))
+        {
+            context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 160, 96));
+
+            context.DrawRectangle(Brushes.Red, null, new Rect(8, 8, 56, 32));
+            using (context.PushClip(new Rect(24, 8, 24, 32)))
+            {
+                context.DrawRectangle(Brushes.Lime, null, new Rect(8, 8, 56, 32));
+            }
+
+            context.DrawRectangle(Brushes.Blue, null, new Rect(80, 8, 48, 32));
+            using (context.PushOpacity(0.5))
+            {
+                context.DrawRectangle(Brushes.Yellow, null, new Rect(80, 8, 48, 32));
+            }
+
+            using (context.PushTransform(Matrix.CreateTranslation(16, 52)))
+            {
+                context.DrawRectangle(Brushes.Purple, null, new Rect(0, 0, 24, 20));
+            }
+
+            context.DrawRectangle(Brushes.Red, null, new Rect(72, 52, 56, 32));
+            using (context.PushClip(new RoundedRect(new Rect(72, 52, 56, 32), 14)))
+            {
+                context.DrawRectangle(Brushes.Lime, null, new Rect(72, 52, 56, 32));
+            }
+        }
+
+        var edgePath = Path.Combine(outputDirectory, "offscreen-edge.png");
+        bitmap.Save(edgePath);
+        ScreenshotVerifier.VerifyPng(edgePath, "offscreen edge");
+        ScreenshotVerifier.VerifyPixel(edgePath, "axis clip outside", 14, 24, Colors.Red, tolerance: 16);
+        ScreenshotVerifier.VerifyPixel(edgePath, "axis clip inside", 34, 24, Colors.Lime, tolerance: 16);
+        ScreenshotVerifier.VerifyPixel(edgePath, "opacity layer blend", 104, 24, Color.FromRgb(128, 128, 127), tolerance: 48);
+        ScreenshotVerifier.VerifyPixel(edgePath, "transform outside", 8, 60, Colors.White, tolerance: 16);
+        ScreenshotVerifier.VerifyPixel(edgePath, "transform inside", 24, 60, Colors.Purple, tolerance: 16);
+        ScreenshotVerifier.VerifyPixel(edgePath, "rounded clip corner", 74, 54, Colors.Red, tolerance: 32);
+        ScreenshotVerifier.VerifyPixel(edgePath, "rounded clip center", 100, 68, Colors.Lime, tolerance: 16);
     }
 
     private static void VerifyJpegQuality(RenderTargetBitmap bitmap, string outputDirectory)
@@ -1079,6 +1123,22 @@ internal static class ScreenshotVerifier
             throw new InvalidOperationException($"The {name} marker was not rendered: {path}");
         }
     }
+
+    public static void VerifyPixel(string path, string name, int x, int y, Color expected, int tolerance)
+    {
+        using var bitmap = new Bitmap(path);
+        using var buffer = new VerifierFramebuffer(bitmap.PixelSize);
+        bitmap.CopyPixels(buffer);
+
+        var actual = buffer.GetPixel(x, y);
+        if (Math.Abs(actual.R - expected.R) > tolerance ||
+            Math.Abs(actual.G - expected.G) > tolerance ||
+            Math.Abs(actual.B - expected.B) > tolerance)
+        {
+            throw new InvalidOperationException(
+                $"The {name} pixel was {actual} at ({x},{y}); expected {expected} within tolerance {tolerance}: {path}");
+        }
+    }
 }
 
 internal sealed class VerifierFramebuffer : ILockedFramebuffer
@@ -1170,6 +1230,19 @@ internal sealed class VerifierFramebuffer : ILockedFramebuffer
         }
 
         return false;
+    }
+
+    public Color GetPixel(int x, int y)
+    {
+        if ((uint)x >= (uint)Size.Width || (uint)y >= (uint)Size.Height)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(x),
+                $"Pixel coordinate ({x},{y}) is outside {Size.Width}x{Size.Height}.");
+        }
+
+        var offset = (y * RowBytes) + (x * 4);
+        return Color.FromArgb(_pixels[offset + 3], _pixels[offset + 2], _pixels[offset + 1], _pixels[offset]);
     }
 
     public void Dispose()
