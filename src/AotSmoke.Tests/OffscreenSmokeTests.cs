@@ -34,6 +34,7 @@ public sealed class OffscreenSmokeTests
 
         Assert.IsTrue(File.Exists(Path.Combine(outputDirectory, "offscreen.png")), "Expected the primary offscreen PNG.");
         Assert.IsTrue(File.Exists(Path.Combine(outputDirectory, "offscreen-edge.png")), "Expected the edge-case offscreen PNG.");
+        Assert.IsTrue(File.Exists(Path.Combine(outputDirectory, "offscreen-dpi192.png")), "Expected the high-DPI offscreen PNG.");
         Assert.IsTrue(File.Exists(Path.Combine(outputDirectory, "offscreen-q15.jpg")), "Expected the low-quality JPEG.");
         Assert.IsTrue(File.Exists(Path.Combine(outputDirectory, "offscreen-q95.jpg")), "Expected the high-quality JPEG.");
     }

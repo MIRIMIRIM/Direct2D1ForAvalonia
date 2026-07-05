@@ -123,6 +123,7 @@ internal static class OffscreenSmoke
         ScreenshotVerifier.VerifyImageBrushMarker(outputPath, "offscreen transformed image brush", 40, 108, 16, 16);
         VerifyJpegQuality(bitmap, options.OutputDirectory);
         RunEdgeCaseSmoke(options.OutputDirectory);
+        RunDpiSmoke(options.OutputDirectory);
         Console.WriteLine($"Offscreen smoke passed. screenshot={outputPath}");
     }
 
@@ -155,6 +156,18 @@ internal static class OffscreenSmoke
             {
                 context.DrawRectangle(Brushes.Lime, null, new Rect(72, 52, 56, 32));
             }
+
+            using (context.PushOpacityMask(new SolidColorBrush(Color.FromArgb(128, 255, 255, 255)), new Rect(132, 52, 20, 32)))
+            {
+                context.DrawRectangle(Brushes.Red, null, new Rect(132, 52, 20, 32));
+            }
+
+            using var yellowBitmap = CreateSolidBitmap(Colors.Yellow, new PixelSize(12, 12));
+            context.DrawRectangle(Brushes.Blue, null, new Rect(132, 12, 18, 18));
+            using (context.PushRenderOptions(new RenderOptions { BitmapBlendingMode = BitmapBlendingMode.Plus }))
+            {
+                context.DrawImage(yellowBitmap, new Rect(0, 0, 12, 12), new Rect(135, 15, 12, 12));
+            }
         }
 
         var edgePath = Path.Combine(outputDirectory, "offscreen-edge.png");
@@ -167,6 +180,55 @@ internal static class OffscreenSmoke
         ScreenshotVerifier.VerifyPixel(edgePath, "transform inside", 24, 60, Colors.Purple, tolerance: 16);
         ScreenshotVerifier.VerifyPixel(edgePath, "rounded clip corner", 74, 54, Colors.Red, tolerance: 32);
         ScreenshotVerifier.VerifyPixel(edgePath, "rounded clip center", 100, 68, Colors.Lime, tolerance: 16);
+        ScreenshotVerifier.VerifyPixel(edgePath, "opacity mask blend", 142, 68, Color.FromRgb(255, 127, 127), tolerance: 48);
+        ScreenshotVerifier.VerifyPixel(edgePath, "plus blend bitmap", 140, 20, Colors.White, tolerance: 24);
+    }
+
+    private static void RunDpiSmoke(string outputDirectory)
+    {
+        using var bitmap = new RenderTargetBitmap(new PixelSize(192, 128), new Vector(192, 192));
+        using (var context = bitmap.CreateDrawingContext(false))
+        {
+            context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 96, 64));
+            context.DrawRectangle(Brushes.Lime, null, new Rect(16, 14, 28, 24));
+            context.DrawLine(new Pen(Brushes.Black, 2), new Point(8, 52), new Point(88, 52));
+        }
+
+        var dpiPath = Path.Combine(outputDirectory, "offscreen-dpi192.png");
+        bitmap.Save(dpiPath);
+        ScreenshotVerifier.VerifyPng(dpiPath, "offscreen high DPI");
+        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI fill", 56, 48, Colors.Lime, tolerance: 16);
+        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI background", 140, 48, Colors.White, tolerance: 16);
+        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI line", 96, 104, Colors.Black, tolerance: 32);
+    }
+
+    private static Bitmap CreateSolidBitmap(Color color, PixelSize size)
+    {
+        var pixels = new byte[size.Width * size.Height * 4];
+        for (var i = 0; i < pixels.Length; i += 4)
+        {
+            var alpha = color.A;
+            pixels[i] = (byte)((color.B * alpha + 127) / 255);
+            pixels[i + 1] = (byte)((color.G * alpha + 127) / 255);
+            pixels[i + 2] = (byte)((color.R * alpha + 127) / 255);
+            pixels[i + 3] = color.A;
+        }
+
+        var handle = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+        try
+        {
+            return new Bitmap(
+                PixelFormats.Bgra8888,
+                AlphaFormat.Premul,
+                handle.AddrOfPinnedObject(),
+                size,
+                new Vector(96, 96),
+                size.Width * 4);
+        }
+        finally
+        {
+            handle.Free();
+        }
     }
 
     private static void VerifyJpegQuality(RenderTargetBitmap bitmap, string outputDirectory)
