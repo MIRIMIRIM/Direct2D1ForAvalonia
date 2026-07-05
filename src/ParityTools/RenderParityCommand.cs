@@ -35,33 +35,25 @@ static int RunController(RenderParityOptions options)
 
     var exePath = Environment.ProcessPath ?? throw new InvalidOperationException("Cannot resolve current process path.");
     var sceneNames = options.Scenes.Count == 0 ? RenderScenes.All.Select(static x => x.Name).ToArray() : options.Scenes.ToArray();
-    var results = new List<RenderParitySceneResult>(sceneNames.Length);
+    var results = new List<RenderParitySceneResult>(checked(sceneNames.Length * 2));
 
     foreach (var sceneName in sceneNames)
     {
         var scene = RenderScenes.Get(sceneName);
         var prefix = SanitizeFileName(scene.Name);
         var d2dPng = Path.Combine(outputDirectory, $"{prefix}.d2d.png");
+        var d2dHarfBuzzPng = Path.Combine(outputDirectory, $"{prefix}.d2d-harfbuzz.png");
         var skiaPng = Path.Combine(outputDirectory, $"{prefix}.skia.png");
         var d2dRaw = Path.Combine(outputDirectory, $"{prefix}.d2d.bgra");
+        var d2dHarfBuzzRaw = Path.Combine(outputDirectory, $"{prefix}.d2d-harfbuzz.bgra");
         var skiaRaw = Path.Combine(outputDirectory, $"{prefix}.skia.bgra");
 
         RunBackend(exePath, "d2d", scene.Name, d2dPng, d2dRaw);
+        RunBackend(exePath, "d2d-harfbuzz", scene.Name, d2dHarfBuzzPng, d2dHarfBuzzRaw);
         RunBackend(exePath, "skia", scene.Name, skiaPng, skiaRaw);
 
-        var metrics = CompareRawImages(d2dRaw, skiaRaw, scene.Size, options.PixelTolerance);
-        var passed =
-            metrics.MeanChannelDelta <= options.MaxMeanChannelDelta &&
-            metrics.PixelsOverTolerancePercent <= options.MaxPixelsOverTolerancePercent;
-
-        results.Add(new RenderParitySceneResult(
-            scene.Name,
-            scene.Size.Width,
-            scene.Size.Height,
-            metrics.MeanChannelDelta,
-            metrics.MaxChannelDelta,
-            metrics.PixelsOverTolerancePercent,
-            passed));
+        AddComparison(scene.Name, scene.Size, d2dRaw, skiaRaw);
+        AddComparison($"{scene.Name} (D2D+HarfBuzz)", scene.Size, d2dHarfBuzzRaw, skiaRaw);
     }
 
     var report = new RenderParityReport(
@@ -78,6 +70,23 @@ static int RunController(RenderParityOptions options)
     Console.WriteLine(JsonSerializer.Serialize(report, jsonOptions));
 
     return report.Passed ? 0 : 1;
+
+    void AddComparison(string name, PixelSize size, string actualPath, string baselinePath)
+    {
+        var metrics = CompareRawImages(actualPath, baselinePath, size, options.PixelTolerance);
+        var passed =
+            metrics.MeanChannelDelta <= options.MaxMeanChannelDelta &&
+            metrics.PixelsOverTolerancePercent <= options.MaxPixelsOverTolerancePercent;
+
+        results.Add(new RenderParitySceneResult(
+            name,
+            size.Width,
+            size.Height,
+            metrics.MeanChannelDelta,
+            metrics.MaxChannelDelta,
+            metrics.PixelsOverTolerancePercent,
+            passed));
+    }
 }
 
 static void RunBackend(string exePath, string backend, string scene, string pngPath, string rawPath)
@@ -123,6 +132,10 @@ static void RunRenderer(RenderParityOptions options)
     if (string.Equals(backend, "d2d", StringComparison.OrdinalIgnoreCase))
     {
         builder.UseDirect2D1().UseDirectWrite();
+    }
+    else if (string.Equals(backend, "d2d-harfbuzz", StringComparison.OrdinalIgnoreCase))
+    {
+        builder.UseDirect2D1().UseHarfBuzz();
     }
     else if (string.Equals(backend, "skia", StringComparison.OrdinalIgnoreCase))
     {

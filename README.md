@@ -7,7 +7,15 @@ This project is not affiliated with or endorsed by AvaloniaUI OÜ.
 `UseDirect2D1()` is separated from text shaping:
 
 - Rendering backend: Direct2D1
+- Font backend: shared DirectWrite-backed font/typeface provider
 - Text shaping: choose explicitly with `UseHarfBuzz()` or `UseDirectWrite()`
+
+Package choice is explicit:
+
+- DirectWrite shaping: reference `MIR.DirectWriteForAvalonia` and call `UseDirectWrite()`.
+- HarfBuzz shaping: reference `Avalonia.HarfBuzz` and call `UseHarfBuzz()`.
+
+`MIR.DirectWriteFontsForAvalonia` is a narrow shared dependency package. Applications normally get it transitively through `MIR.Direct2D1ForAvalonia` or `MIR.DirectWriteForAvalonia`; it supplies the Windows font backend that both shapers consume through Avalonia's `IPlatformTypeface` APIs.
 
 Example:
 
@@ -49,14 +57,15 @@ Licensing:
 
 Packaging:
 
-- Packages target Avalonia `12.0.0`; NuGet package versions come from the `<Version>` values in the two package projects.
+- Packages target Avalonia `12.0.0`; NuGet package versions come from the `<Version>` values in the package projects.
+- Pack with `dotnet pack src/DirectWriteFontsForAvalonia/MIR.DirectWriteFontsForAvalonia.csproj -c Release`
 - Pack with `dotnet pack src/Direct2D1ForAvalonia/MIR.Direct2D1ForAvalonia.csproj -c Release`
 - Pack with `dotnet pack src/DirectWriteForAvalonia/MIR.DirectWriteForAvalonia.csproj -c Release`
-- Both packages embed `README.md`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`.
+- Packages embed `README.md`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`.
 
 Validation:
 
-- Fast local check: `pwsh scripts/validate.ps1` builds the solution, runs the TextParity and AotSmoke test projects, and runs the TextParity CLI report.
+- Fast local check: `pwsh scripts/validate.ps1` builds the solution, runs the TextParity, AotSmoke, and HarfBuzz smoke test projects, and runs the TextParity CLI report.
 - Include Skia/D2D render parity scenes: `pwsh scripts/validate.ps1 -RunRenderParity` (via `ParityTools render`)
 - Include real window screenshot smoke: `pwsh scripts/validate.ps1 -RunWindowSmoke`
 - Include benchmark smoke: `pwsh scripts/validate.ps1 -RunBenchmarks`

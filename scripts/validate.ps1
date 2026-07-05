@@ -51,6 +51,10 @@ try {
         dotnet test src\AotSmoke.Tests\AotSmoke.Tests.csproj -c $Configuration --no-build -v minimal
     }
 
+    Invoke-ValidationStep "HarfBuzz smoke tests" {
+        dotnet test src\HarfBuzzSmoke.Tests\HarfBuzzSmoke.Tests.csproj -c $Configuration --no-build -v minimal
+    }
+
     if (-not $SkipTextParityCli) {
         Invoke-ValidationStep "TextParity CLI" {
             dotnet run --project src\ParityTools\ParityTools.csproj -c $Configuration --no-build -- `
