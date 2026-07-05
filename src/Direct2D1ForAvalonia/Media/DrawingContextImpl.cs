@@ -468,6 +468,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 Math.Max(rrect.RadiiTopRight.Y, Math.Max(rrect.RadiiBottomRight.Y, rrect.RadiiBottomLeft.Y)));
             var isRounded = !IsZero(radiusX) || !IsZero(radiusY);
             using var roundedGeometry = isRounded ? CreateRoundedRectGeometry(rrect) : null;
+            using var rectGeometry = isRounded ? null : Direct2D1Platform.Direct2D1Factory.CreateRectangleGeometry(rc);
+            var shapeGeometry = roundedGeometry ?? (ID2D1Geometry)rectGeometry!;
+
+            DrawBoxShadows(rrect, shapeGeometry, boxShadow, inset: false);
 
             if (brush != null)
             {
@@ -486,6 +490,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     }
                 }
             }
+
+            DrawBoxShadows(rrect, shapeGeometry, boxShadow, inset: true);
 
             if (pen?.Brush != null)
             {
@@ -776,6 +782,265 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 ArcSize = ArcSize.Small
             });
         }
+
+        private void DrawBoxShadows(
+            RoundedRect roundedRect,
+            ID2D1Geometry originalGeometry,
+            BoxShadows boxShadows,
+            bool inset)
+        {
+            for (var i = 0; i < boxShadows.Count; i++)
+            {
+                var shadow = boxShadows[i];
+                if (shadow.Equals(default(BoxShadow)) ||
+                    shadow.IsInset != inset ||
+                    shadow.Color.A == 0)
+                {
+                    continue;
+                }
+
+                if (inset)
+                    DrawInsetBoxShadow(roundedRect, originalGeometry, shadow);
+                else
+                    DrawOuterBoxShadow(roundedRect, originalGeometry, shadow);
+            }
+        }
+
+        private void DrawOuterBoxShadow(
+            RoundedRect roundedRect,
+            ID2D1Geometry originalGeometry,
+            BoxShadow shadow)
+        {
+            var caster = InflateAndOffsetRoundedRect(
+                roundedRect,
+                shadow.Spread,
+                shadow.OffsetX,
+                shadow.OffsetY);
+
+            if (caster.Rect.Width <= 0 || caster.Rect.Height <= 0)
+                return;
+
+            using var casterGeometry = CreateRoundedRectGeometry(caster);
+            var maskBounds = GetShadowMaskBounds(caster.Rect, shadow.Blur);
+            using var boundsGeometry = Direct2D1Platform.Direct2D1Factory.CreateRectangleGeometry(maskBounds.ToDirect2D());
+            using var clipGeometry = CombineGeometries(boundsGeometry, originalGeometry, CombineMode.Exclude);
+
+            DrawShadowGeometry(casterGeometry, maskBounds, shadow, clipGeometry, maskBounds);
+        }
+
+        private void DrawInsetBoxShadow(
+            RoundedRect roundedRect,
+            ID2D1Geometry originalGeometry,
+            BoxShadow shadow)
+        {
+            var outerRect = AreaCastingShadowInHole(
+                roundedRect.Rect,
+                shadow.Blur,
+                shadow.Spread,
+                shadow.OffsetX,
+                shadow.OffsetY);
+            outerRect = OffsetRect(outerRect, shadow.OffsetX, shadow.OffsetY);
+
+            var inner = InflateAndOffsetRoundedRect(
+                roundedRect,
+                -shadow.Spread,
+                shadow.OffsetX,
+                shadow.OffsetY);
+
+            using var outerGeometry = Direct2D1Platform.Direct2D1Factory.CreateRectangleGeometry(outerRect.ToDirect2D());
+            using var casterGeometry = inner.Rect.Width > 0 && inner.Rect.Height > 0
+                ? CombineInsetShadowGeometry(outerGeometry, inner)
+                : Direct2D1Platform.Direct2D1Factory.CreateRectangleGeometry(outerRect.ToDirect2D());
+
+            var maskBounds = GetShadowMaskBounds(outerRect, shadow.Blur);
+            DrawShadowGeometry(casterGeometry, maskBounds, shadow, originalGeometry, roundedRect.Rect);
+        }
+
+        private void DrawShadowGeometry(
+            ID2D1Geometry geometry,
+            Rect maskBounds,
+            BoxShadow shadow,
+            ID2D1Geometry clipGeometry,
+            Rect clipBounds)
+        {
+            if (maskBounds.Width <= 0 || maskBounds.Height <= 0)
+                return;
+
+            void Draw()
+            {
+                if (shadow.Blur <= 0)
+                {
+                    using var shadowBrush = _deviceContext.CreateSolidColorBrush(shadow.Color.ToDirect2D());
+                    _deviceContext.FillGeometry(geometry, shadowBrush);
+                    return;
+                }
+
+                using var mask = CreateGeometryMask(geometry, maskBounds);
+                using var shadowEffect = CreateShadowEffect(mask.Bitmap, shadow);
+                using var output = shadowEffect.Output;
+                _deviceContext.DrawImage(
+                    output,
+                    new Vector2((float)maskBounds.X, (float)maskBounds.Y),
+                    null,
+                    InterpolationMode.Linear,
+                    CompositeMode.SourceOver);
+            }
+
+            DrawWithGeometryClip(clipGeometry, clipBounds, Draw);
+        }
+
+        private ID2D1BitmapRenderTarget CreateGeometryMask(ID2D1Geometry geometry, Rect maskBounds)
+        {
+            var mask = _renderTarget.CreateCompatibleRenderTarget(
+                maskBounds.Size.ToSharpDX(),
+                null,
+                null,
+                CompatibleRenderTargetOptions.None);
+
+            try
+            {
+                mask.BeginDraw();
+                mask.Clear(Colors.Transparent.ToDirect2D());
+                mask.Transform = Matrix3x2.CreateTranslation(
+                    (float)-maskBounds.X,
+                    (float)-maskBounds.Y);
+
+                using (var brush = mask.CreateSolidColorBrush(Colors.White.ToDirect2D()))
+                {
+                    mask.FillGeometry(geometry, brush);
+                }
+
+                mask.EndDraw().CheckError();
+                return mask;
+            }
+            catch
+            {
+                mask.Dispose();
+                throw;
+            }
+        }
+
+        private ID2D1Effect CreateShadowEffect(ID2D1Image source, BoxShadow shadow)
+        {
+            var effect = new ID2D1Effect(_deviceContext.CreateEffect(EffectGuids.Shadow));
+            effect.SetInput(0, source, true);
+            effect.SetValue((uint)ShadowProperties.BlurStandardDeviation, SkBlurRadiusToSigma(shadow.Blur));
+            effect.SetValue(
+                (uint)ShadowProperties.Color,
+                new Vector4(
+                    shadow.Color.R / 255f,
+                    shadow.Color.G / 255f,
+                    shadow.Color.B / 255f,
+                    shadow.Color.A / 255f));
+            return effect;
+        }
+
+        private void DrawWithGeometryClip(ID2D1Geometry clipGeometry, Rect bounds, Action draw)
+        {
+            var parameters = new LayerParameters
+            {
+                ContentBounds = bounds.ToDirect2D(),
+                MaskTransform = Matrix3x2.Identity,
+                Opacity = 1,
+                GeometricMask = clipGeometry,
+                MaskAntialiasMode = AntialiasMode.PerPrimitive
+            };
+
+            PushDirect2DLayer(parameters);
+            try
+            {
+                draw();
+            }
+            finally
+            {
+                PopLayer();
+            }
+        }
+
+        private static ID2D1Geometry CombineInsetShadowGeometry(ID2D1Geometry outerGeometry, RoundedRect inner)
+        {
+            using var innerGeometry = CreateRoundedRectGeometry(inner);
+            return CombineGeometries(outerGeometry, innerGeometry, CombineMode.Exclude);
+        }
+
+        private static ID2D1PathGeometry CombineGeometries(
+            ID2D1Geometry first,
+            ID2D1Geometry second,
+            CombineMode mode)
+        {
+            var result = Direct2D1Platform.Direct2D1Factory.CreatePathGeometry();
+            try
+            {
+                using (var sink = result.Open())
+                {
+                    first.CombineWithGeometry(second, mode, sink);
+                    sink.Close();
+                }
+
+                return result;
+            }
+            catch
+            {
+                result.Dispose();
+                throw;
+            }
+        }
+
+        private static RoundedRect InflateAndOffsetRoundedRect(
+            RoundedRect roundedRect,
+            double inflate,
+            double offsetX,
+            double offsetY)
+        {
+            var rect = new Rect(
+                roundedRect.Rect.X - inflate + offsetX,
+                roundedRect.Rect.Y - inflate + offsetY,
+                roundedRect.Rect.Width + (inflate * 2),
+                roundedRect.Rect.Height + (inflate * 2));
+
+            return new RoundedRect(
+                rect,
+                InflateRadius(roundedRect.RadiiTopLeft, inflate),
+                InflateRadius(roundedRect.RadiiTopRight, inflate),
+                InflateRadius(roundedRect.RadiiBottomRight, inflate),
+                InflateRadius(roundedRect.RadiiBottomLeft, inflate));
+        }
+
+        private static AVector InflateRadius(AVector radius, double inflate)
+            => new(Math.Max(0, radius.X + inflate), Math.Max(0, radius.Y + inflate));
+
+        private static Rect GetShadowMaskBounds(Rect geometryBounds, double blur)
+            => geometryBounds.Inflate(GetShadowPadding(blur));
+
+        private static double GetShadowPadding(double blur)
+        {
+            if (blur <= 0)
+                return 0;
+
+            var sigma = SkBlurRadiusToSigma(blur);
+            return Math.Ceiling(Math.Max(blur, sigma * 3.0) + 1.0);
+        }
+
+        private static float SkBlurRadiusToSigma(double radius)
+            => radius <= 0 ? 0 : (0.288675f * (float)radius) + 0.5f;
+
+        private static Rect AreaCastingShadowInHole(
+            Rect holeRect,
+            double shadowBlur,
+            double shadowSpread,
+            double offsetX,
+            double offsetY)
+        {
+            var area = holeRect.Inflate(shadowBlur);
+            if (shadowSpread < 0)
+                area = area.Inflate(-shadowSpread);
+
+            var offsetArea = OffsetRect(area, -offsetX, -offsetY);
+            return area.Union(offsetArea);
+        }
+
+        private static Rect OffsetRect(Rect rect, double offsetX, double offsetY)
+            => new(rect.X + offsetX, rect.Y + offsetY, rect.Width, rect.Height);
 
         public void PushClip(IPlatformRenderInterfaceRegion region)
         {
