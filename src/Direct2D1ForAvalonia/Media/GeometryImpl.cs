@@ -1,5 +1,5 @@
 using System;
-using Avalonia.Logging;
+using System.Numerics;
 using Avalonia.Media;
 using Avalonia.Platform;
 using Vortice.Direct2D1;
@@ -131,17 +131,63 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public bool TryGetSegment(double startDistance, double stopDistance, bool startOnBeginFigure, out IGeometryImpl segmentGeometry)
         {
-            // Direct2D has no path-slicing primitive, and Vortice exposes nothing close to it.
-            // The only route would be to walk the contour at fine increments and rebuild a
-            // polyline, which loses curve information and produces visibly faceted output for
-            // Bezier segments. Returning false lets callers (dashed strokes, path trimming)
-            // apply their own fallback rather than render an incorrect angular approximation.
-            Logger.TryGet(LogEventLevel.Warning, LogArea.Visual)?.Log(this, "TryGetSegment is not available in Direct2D.");
+            var contourLength = ContourLength;
+            if (contourLength <= 0 || stopDistance <= startDistance)
+            {
+                segmentGeometry = null!;
+                return false;
+            }
 
-            segmentGeometry = null!;
-            return false;
+            var start = Math.Clamp(startDistance, 0, contourLength);
+            var stop = Math.Clamp(stopDistance, 0, contourLength);
+            if (stop <= start)
+            {
+                segmentGeometry = null!;
+                return false;
+            }
+
+            var result = Direct2D1Platform.Direct2D1Factory.CreatePathGeometry();
+            try
+            {
+                using (var sink = result.Open())
+                {
+                    Geometry.ComputePointAtLength((float)start, ContourApproximation, out var startPoint);
+                    sink.BeginFigure(startPoint, FigureBegin.Hollow);
+
+                    var length = stop - start;
+                    var segmentCount = Math.Clamp((int)Math.Ceiling(length / 0.5), 1, 4096);
+                    var previousPoint = startPoint;
+
+                    for (var i = 1; i <= segmentCount; i++)
+                    {
+                        var distance = start + (length * i / segmentCount);
+                        Geometry.ComputePointAtLength((float)distance, ContourApproximation, out var point);
+
+                        if (!AreClose(previousPoint, point))
+                        {
+                            sink.AddLine(point);
+                            previousPoint = point;
+                        }
+                    }
+
+                    sink.EndFigure(FigureEnd.Open);
+                    sink.Close();
+                }
+
+                segmentGeometry = new StreamGeometryImpl(result);
+                return true;
+            }
+            catch
+            {
+                result.Dispose();
+                throw;
+            }
         }
 
         protected virtual ID2D1Geometry GetSourceGeometry() => Geometry;
+
+        private static bool AreClose(Vector2 left, Vector2 right)
+            => Math.Abs(left.X - right.X) < ContourApproximation &&
+               Math.Abs(left.Y - right.Y) < ContourApproximation;
     }
 }
