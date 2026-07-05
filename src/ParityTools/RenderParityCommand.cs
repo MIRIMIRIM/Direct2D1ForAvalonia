@@ -136,7 +136,7 @@ static void RunRenderer(RenderParityOptions options)
     builder.SetupWithoutStarting();
 
     var scene = RenderScenes.Get(sceneName);
-    using var bitmap = new RenderTargetBitmap(scene.Size, new Vector(96, 96));
+    using var bitmap = new RenderTargetBitmap(scene.Size, scene.Dpi);
     using (var context = bitmap.CreateDrawingContext(false))
     {
         scene.Render(context);
@@ -204,9 +204,13 @@ internal static class RenderScenes
 {
     public static readonly RenderScene[] All =
     [
-        new("ShapesAndBrushes", new PixelSize(256, 160), DrawShapesAndBrushes),
-        new("TextAndGeometry", new PixelSize(256, 160), DrawTextAndGeometry),
-        new("ClipsAndOpacity", new PixelSize(192, 128), DrawClipsAndOpacity),
+        new("ShapesAndBrushes", new PixelSize(256, 160), new Vector(96, 96), DrawShapesAndBrushes),
+        new("TextAndGeometry", new PixelSize(256, 160), new Vector(96, 96), DrawTextAndGeometry),
+        new("ClipsAndOpacity", new PixelSize(192, 128), new Vector(96, 96), DrawClipsAndOpacity),
+        new("HighDpiScaling", new PixelSize(192, 128), new Vector(192, 192), DrawHighDpiScaling),
+        new("ImageBrushTransforms", new PixelSize(224, 144), new Vector(96, 96), DrawImageBrushTransforms),
+        new("OpacityMaskAndBlend", new PixelSize(192, 128), new Vector(96, 96), DrawOpacityMaskAndBlend),
+        new("GradientVariants", new PixelSize(224, 144), new Vector(96, 96), DrawGradientVariants),
     ];
 
     public static RenderScene Get(string name)
@@ -278,11 +282,105 @@ internal static class RenderScenes
             context.DrawRectangle(Brushes.Purple, null, new Rect(0, 0, 76, 24));
         }
     }
+
+    private static void DrawHighDpiScaling(DrawingContext context)
+    {
+        context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 96, 64));
+        context.DrawRectangle(Brushes.Lime, null, new Rect(16, 14, 28, 24));
+        context.DrawLine(new Pen(Brushes.Black, 2), new Point(8, 52), new Point(88, 52));
+        context.DrawEllipse(new SolidColorBrush(Color.FromArgb(180, 24, 118, 210)), null, new Rect(52, 12, 28, 28));
+    }
+
+    private static void DrawImageBrushTransforms(DrawingContext context)
+    {
+        context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 224, 144));
+
+        var tiled = SmokeTileBrush.Create(TileMode.Tile);
+        context.DrawRectangle(tiled, null, new Rect(14, 14, 72, 48));
+
+        var flipped = SmokeTileBrush.Create(
+            TileMode.FlipXY,
+            destinationRect: new RelativeRect(0, 0, 0.5, 1, RelativeUnit.Relative),
+            transform: new TranslateTransform(18, 0));
+        context.DrawRectangle(flipped, null, new Rect(106, 14, 88, 48));
+
+        using (context.PushTransform(Matrix.CreateTranslation(28, 84) * Matrix.CreateRotation(Math.PI / 18)))
+        {
+            context.DrawRectangle(SmokeTileBrush.Create(TileMode.Tile), null, new RoundedRect(new Rect(0, 0, 92, 34), 8));
+        }
+    }
+
+    private static void DrawOpacityMaskAndBlend(DrawingContext context)
+    {
+        context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 192, 128));
+
+        context.DrawRectangle(Brushes.Blue, null, new Rect(18, 18, 62, 42));
+        using (context.PushOpacity(0.55))
+        {
+            context.DrawRectangle(Brushes.Yellow, null, new Rect(36, 30, 62, 42));
+        }
+
+        using (context.PushOpacityMask(new LinearGradientBrush
+        {
+            StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+            EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
+            GradientStops =
+            {
+                new GradientStop(Colors.Transparent, 0),
+                new GradientStop(Colors.White, 1)
+            }
+        }, new Rect(112, 16, 54, 48)))
+        {
+            context.DrawRectangle(Brushes.Crimson, null, new Rect(112, 16, 54, 48));
+        }
+
+        using var yellowBitmap = SolidBitmap.Create(Colors.Yellow, new PixelSize(18, 18));
+        context.DrawRectangle(Brushes.Blue, null, new Rect(34, 82, 32, 28));
+        using (context.PushRenderOptions(new RenderOptions { BitmapBlendingMode = BitmapBlendingMode.Plus }))
+        {
+            context.DrawImage(yellowBitmap, new Rect(0, 0, 18, 18), new Rect(44, 88, 18, 18));
+        }
+    }
+
+    private static void DrawGradientVariants(DrawingContext context)
+    {
+        context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 224, 144));
+
+        context.DrawRectangle(new RadialGradientBrush
+        {
+            Center = RelativePoint.Center,
+            GradientOrigin = new RelativePoint(0.25, 0.25, RelativeUnit.Relative),
+            RadiusX = new RelativeScalar(0.7, RelativeUnit.Relative),
+            RadiusY = new RelativeScalar(0.7, RelativeUnit.Relative),
+            GradientStops =
+            {
+                new GradientStop(Color.FromRgb(255, 245, 160), 0),
+                new GradientStop(Color.FromRgb(20, 100, 210), 1)
+            }
+        }, null, new RoundedRect(new Rect(16, 18, 74, 74), 10));
+
+        context.DrawRectangle(new ConicGradientBrush
+        {
+            Center = RelativePoint.Center,
+            GradientStops =
+            {
+                new GradientStop(Color.FromRgb(220, 50, 70), 0),
+                new GradientStop(Color.FromRgb(250, 220, 80), 0.35),
+                new GradientStop(Color.FromRgb(70, 180, 220), 0.7),
+                new GradientStop(Color.FromRgb(220, 50, 70), 1)
+            }
+        }, null, new RoundedRect(new Rect(112, 18, 74, 74), 10));
+
+        context.DrawEllipse(null, new Pen(new SolidColorBrush(Color.FromRgb(25, 25, 25)), 2), new Rect(44, 104, 128, 22));
+    }
 }
 
 internal static class SmokeTileBrush
 {
-    public static ImageBrush Create()
+    public static ImageBrush Create(
+        TileMode tileMode = TileMode.FlipXY,
+        RelativeRect? destinationRect = null,
+        ITransform? transform = null)
     {
         var pixels = new byte[12 * 12 * 4];
         for (var y = 0; y < 12; y++)
@@ -310,7 +408,10 @@ internal static class SmokeTileBrush
                 12 * 4))
             {
                 Stretch = Stretch.Fill,
-                TileMode = TileMode.FlipXY
+                TileMode = tileMode,
+                SourceRect = RelativeRect.Fill,
+                DestinationRect = destinationRect ?? RelativeRect.Fill,
+                Transform = transform
             };
         }
         finally
@@ -320,7 +421,39 @@ internal static class SmokeTileBrush
     }
 }
 
-internal sealed record RenderScene(string Name, PixelSize Size, Action<DrawingContext> Render);
+internal static class SolidBitmap
+{
+    public static Bitmap Create(Color color, PixelSize size)
+    {
+        var pixels = new byte[size.Width * size.Height * 4];
+        for (var i = 0; i < pixels.Length; i += 4)
+        {
+            var alpha = color.A;
+            pixels[i] = (byte)((color.B * alpha + 127) / 255);
+            pixels[i + 1] = (byte)((color.G * alpha + 127) / 255);
+            pixels[i + 2] = (byte)((color.R * alpha + 127) / 255);
+            pixels[i + 3] = alpha;
+        }
+
+        var handle = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+        try
+        {
+            return new Bitmap(
+                PixelFormats.Bgra8888,
+                AlphaFormat.Premul,
+                handle.AddrOfPinnedObject(),
+                size,
+                new Vector(96, 96),
+                size.Width * 4);
+        }
+        finally
+        {
+            handle.Free();
+        }
+    }
+}
+
+internal sealed record RenderScene(string Name, PixelSize Size, Vector Dpi, Action<DrawingContext> Render);
 
 internal sealed record ImageComparisonMetrics(
     double MeanChannelDelta,
