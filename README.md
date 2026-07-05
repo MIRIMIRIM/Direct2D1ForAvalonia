@@ -57,4 +57,5 @@ Validation:
 
 - Fast local check: `pwsh scripts/validate.ps1`
 - Include real window screenshot smoke: `pwsh scripts/validate.ps1 -RunWindowSmoke`
+- Include Skia/D2D render parity smoke: `pwsh scripts/validate.ps1 -RunRenderParity`
 - Include benchmark smoke: `pwsh scripts/validate.ps1 -RunBenchmarks`

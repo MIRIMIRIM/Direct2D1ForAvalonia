@@ -3,6 +3,7 @@ param(
     [string]$Configuration = "Debug",
     [switch]$SkipTextParityCli,
     [switch]$RunWindowSmoke,
+    [switch]$RunRenderParity,
     [switch]$RunBenchmarks,
     [string]$ArtifactsPath = ""
 )
@@ -64,6 +65,15 @@ try {
                 --auto-exit `
                 --out (Join-Path $artifacts "aotsmoke") `
                 --timeout-ms 10000
+        }
+    }
+
+    if ($RunRenderParity) {
+        Invoke-ValidationStep "Render parity smoke" {
+            dotnet run --project src\RenderParity\RenderParity.csproj -c $Configuration --no-build -- `
+                --scene "ShapesAndBrushes,ClipsAndOpacity" `
+                --out-dir (Join-Path $artifacts "renderparity") `
+                --report-json (Join-Path $artifacts "renderparity-report.json")
         }
     }
 
