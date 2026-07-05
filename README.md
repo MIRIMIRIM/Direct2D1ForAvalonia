@@ -13,17 +13,6 @@ Example:
 
 ```csharp
 using MIR.Direct2D1ForAvalonia;
-
-AppBuilder.Configure<App>()
-    .UseWin32()
-    .UseDirect2D1()
-    .UseHarfBuzz();
-```
-
-To switch shaping to DirectWrite:
-
-```csharp
-using MIR.Direct2D1ForAvalonia;
 using MIR.DirectWriteForAvalonia;
 
 AppBuilder.Configure<App>()
@@ -32,12 +21,24 @@ AppBuilder.Configure<App>()
     .UseDirectWrite();
 ```
 
+To keep Avalonia's HarfBuzz shaping instead, reference `Avalonia.HarfBuzz` in your app and call `UseHarfBuzz()`:
+
+```csharp
+using MIR.Direct2D1ForAvalonia;
+
+AppBuilder.Configure<App>()
+    .UseWin32()
+    .UseDirect2D1()
+    .UseHarfBuzz();
+```
+
 ## Known limitations
 
 - **Windows only.** Direct2D1/DirectWrite are not available on other platforms.
-- **Window surfaces.** `UseDirect2D1()` renders via `IDirect3D11TexturePlatformSurface` (the composition path Avalonia lights up through WinUI Composition / DirectComposition) or an external Direct2D render target (`IExternalDirect2DRenderTargetSurface`). Bare-HWND swap chains and the software framebuffer fallback are not supported and will throw `NotSupportedException` at render-target creation.
+- **Window surfaces.** `UseDirect2D1()` renders windows when Avalonia supplies an `IDirect3D11TexturePlatformSurface`, or when the host supplies an external Direct2D render target (`IExternalDirect2DRenderTargetSurface`). Bare-HWND swap chains and the software framebuffer fallback are not supported and will throw `NotSupportedException` at render-target creation.
 - **Bitmap formats.** `Bitmap.Save` accepts `.png`, `.jpg/.jpeg`, `.bmp`, `.tif/.tiff`, `.gif`, and `.webp` via the file extension. The optional `quality` parameter is applied to JPEG output through WIC's `ImageQuality` encoder option.
 - **Path segmenting.** `Geometry.TryGetSegment` is supported through a Direct2D length-sampled polyline approximation. It preserves path trimming behavior, but returned curve segments are flattened rather than retaining their original Bezier/arc commands.
+- **Text parity.** DirectWrite shaping is validated against Avalonia's Skia/HarfBuzz path, but a small set of engine/font-metric divergences is tracked as known rather than bit-for-bit identical.
 - **3D transforms.** Only the 2D `Transform` (Matrix) is honored. There is no per-context 4x4/perspective transform.
 - **Thread affinity.** The Direct2D device context is thread-affine. The standard single-render-thread Avalonia model is fine; the `EnsureCurrent()` hook does not currently marshal or assert thread ownership.
 
@@ -48,14 +49,14 @@ Licensing:
 
 Packaging:
 
-- Current package version baseline is `12.0.0`.
+- Packages target Avalonia `12.0.0`; NuGet package versions come from the `<Version>` values in the two package projects.
 - Pack with `dotnet pack src/Direct2D1ForAvalonia/MIR.Direct2D1ForAvalonia.csproj -c Release`
 - Pack with `dotnet pack src/DirectWriteForAvalonia/MIR.DirectWriteForAvalonia.csproj -c Release`
 - Both packages embed `README.md`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`.
 
 Validation:
 
-- Fast local check: `pwsh scripts/validate.ps1`
+- Fast local check: `pwsh scripts/validate.ps1` builds the solution, runs the TextParity and AotSmoke test projects, and runs the TextParity CLI report.
+- Include Skia/D2D render parity scenes: `pwsh scripts/validate.ps1 -RunRenderParity` (via `ParityTools render`)
 - Include real window screenshot smoke: `pwsh scripts/validate.ps1 -RunWindowSmoke`
-- Include Skia/D2D render parity smoke: `pwsh scripts/validate.ps1 -RunRenderParity`
 - Include benchmark smoke: `pwsh scripts/validate.ps1 -RunBenchmarks`
