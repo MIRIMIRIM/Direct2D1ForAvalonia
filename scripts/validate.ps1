@@ -71,7 +71,6 @@ try {
     if ($RunRenderParity) {
         Invoke-ValidationStep "Render parity smoke" {
             dotnet run --project src\RenderParity\RenderParity.csproj -c $Configuration --no-build -- `
-                --scene "ShapesAndBrushes,ClipsAndOpacity" `
                 --out-dir (Join-Path $artifacts "renderparity") `
                 --report-json (Join-Path $artifacts "renderparity-report.json")
         }
