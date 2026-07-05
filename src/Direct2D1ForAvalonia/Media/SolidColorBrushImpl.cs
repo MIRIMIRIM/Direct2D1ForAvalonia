@@ -16,21 +16,5 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 }
             );
         }
-
-        /// <summary>
-        /// Direct2D has no ConicGradient implementation so fall back to a solid colour brush based on 
-        /// the first gradient stop.
-        /// </summary>
-        public SolidColorBrushImpl(IConicGradientBrush? brush, ID2D1DeviceContext target)
-        {
-            PlatformBrush = target.CreateSolidColorBrush(
-                brush?.GradientStops[0].Color.ToDirect2D() ?? new Vortice.Mathematics.Color(),
-                new BrushProperties
-                {
-                    Opacity = brush != null ? (float)brush.Opacity : 1.0f,
-                    Transform = target.Transform
-                }
-            );
-        }
     }
 }

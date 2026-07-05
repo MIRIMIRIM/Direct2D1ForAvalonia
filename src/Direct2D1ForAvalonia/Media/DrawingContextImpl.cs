@@ -1214,8 +1214,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             }
             else if (conicGradientBrush != null)
             {
-                // there is no Direct2D implementation of Conic Gradients so use Radial as a stand-in
-                return new SolidColorBrushImpl(conicGradientBrush, _deviceContext);
+                return new ConicGradientBrushImpl(conicGradientBrush, _deviceContext, destinationRect);
             }
             else if (imageBrush?.Source is { } imageBrushSource && TryGetImageBrushBitmap(imageBrushSource, out var imageBrushBitmap))
             {
