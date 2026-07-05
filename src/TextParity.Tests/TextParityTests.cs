@@ -5,8 +5,10 @@ public sealed class TextParityTests
 {
     private static readonly string[] s_expectedKnownDivergences =
     [
+        "Devanagari",
         "RTL Trailing CRLF",
         "Surrogate Pair (Emoji kerning)",
+        "Variable font Latin",
     ];
 
     [TestMethod]

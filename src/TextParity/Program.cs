@@ -545,6 +545,8 @@ internal static class Program
         // only the space advance differs by a sub-pixel amount. The kern-off sibling passes.
         ["Surrogate Pair (Emoji kerning)"] = "Engine-level GPOS kern divergence (glyph ids/clusters match; only the space advance differs).",
         ["RTL Trailing CRLF"] = "Invisible zero-advance trailing break glyph offset differs in RTL; glyph id, cluster and advance match.",
+        ["Variable font Latin"] = "Variable font default instance metrics differ between DirectWrite and HarfBuzz; glyph ids/clusters match.",
+        ["Devanagari"] = "Indic glyph ids/clusters match, but DirectWrite and HarfBuzz differ in Nirmala UI advances and mark offsets.",
     };
 
     private static bool IsKnownDivergence(string name, out string reason)
@@ -575,6 +577,12 @@ internal static class Program
                 CaseTier.Tier1,
                 Features: [AvaloniaFontFeature.Parse("liga=0")]),
             new TestCase(
+                "Latin (liga range off)",
+                "ffi ffi",
+                "segoeui.ttf",
+                CaseTier.Tier1,
+                Features: [Feature("liga", 0, 0, 3)]),
+            new TestCase(
                 "Latin (kern on)",
                 "AVAVAV",
                 "segoeui.ttf",
@@ -586,7 +594,14 @@ internal static class Program
                 "segoeui.ttf",
                 CaseTier.Tier1,
                 Features: [AvaloniaFontFeature.Parse("kern=0")]),
+            new TestCase(
+                "Latin (kern range off)",
+                "AV AV",
+                "segoeui.ttf",
+                CaseTier.Tier1,
+                Features: [Feature("kern", 0, 0, 2)]),
             new TestCase("Latin letter spacing", "Spacing", "segoeui.ttf", CaseTier.Tier1, LetterSpacing: 1.25),
+            new TestCase("Variable font Latin", "Variable AV", "SegUIVar.ttf", CaseTier.Tier2),
             new TestCase("Hebrew (RTL)", "שלום עולם", "arial.ttf", CaseTier.Tier1, 1, "he-IL"),
             new TestCase("Combining Marks", "A\u030AA\u030A", "segoeui.ttf", CaseTier.Tier1),
             new TestCase("Combining Marks array slice", "A\u030AA\u030A", "segoeui.ttf", CaseTier.Tier1, MemoryPrefix: "<<", MemorySuffix: ">>", MemoryKind: InputMemoryKind.Array),
@@ -634,6 +649,8 @@ internal static class Program
                 MemorySuffix: ">"),
             new TestCase("Mixed LTR RTL digits", "abc שלום 123", "arial.ttf", CaseTier.Tier2),
             new TestCase("Arabic", "مرحبا بالعالم", "arial.ttf", CaseTier.Tier2, 1, "ar-SA"),
+            new TestCase("Thai", "สวัสดีโลก", "LeelawUI.ttf", CaseTier.Tier2, Culture: "th-TH"),
+            new TestCase("Devanagari", "नमस्ते दुनिया", "Nirmala.ttc", CaseTier.Tier2, Culture: "hi-IN"),
             new TestCase("Zero Width Joiner", "A\u200DB", "segoeui.ttf", CaseTier.Tier2),
             new TestCase("Non-breaking spaces", "A\u00A0B\u2007C\u202FD", "segoeui.ttf", CaseTier.Tier2),
             new TestCase("CJK Chinese", "你好世界", "msyh.ttc", CaseTier.Tier1, Culture: "zh-CN"),
@@ -642,6 +659,17 @@ internal static class Program
             new TestCase("Surrogate Pair (Emoji kerning)", "Hello \uD83D\uDE00 World", "seguiemj.ttf", CaseTier.Tier2),
             new TestCase("Mixed Script Digits", "Invoice ١٢٣-ABC", "segoeui.ttf", CaseTier.Tier2)
         ];
+    }
+
+    private static AvaloniaFontFeature Feature(string tag, int value, int start, int end)
+    {
+        return new AvaloniaFontFeature
+        {
+            Tag = tag,
+            Value = value,
+            Start = start,
+            End = end
+        };
     }
 
     private static ReadOnlyMemory<char> CreateInputMemory(TestCase testCase)
