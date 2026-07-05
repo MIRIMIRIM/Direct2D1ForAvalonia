@@ -378,7 +378,9 @@ namespace MIR.Direct2D1ForAvalonia
             // (Avalonia drives rendering from a single render thread), but in debug builds we
             // remember the first thread that claimed the context and assert subsequent claims
             // come from the same thread, so accidental cross-thread use surfaces immediately.
+#if DEBUG
             private int _ownerThreadId = -1;
+#endif
 
             private Direct2DGraphicsContext()
             {
