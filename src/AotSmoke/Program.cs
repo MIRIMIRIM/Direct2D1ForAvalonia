@@ -84,8 +84,22 @@ internal static class OffscreenSmoke
                 }));
 
             var path = Geometry.Parse("M 14,122 C 54,82 104,134 146,96");
+            if (!path.TryGetPointAndTangentAtDistance(12, out var pathPoint, out var pathTangent) ||
+                pathPoint.X < 14 || pathPoint.X > 146 ||
+                pathPoint.Y < 80 || pathPoint.Y > 134)
+            {
+                throw new InvalidOperationException($"Geometry.TryGetPointAndTangentAtDistance produced an unexpected point: {pathPoint}.");
+            }
+
+            var tangentLength = Math.Sqrt((pathTangent.X * pathTangent.X) + (pathTangent.Y * pathTangent.Y));
+            if (tangentLength < 0.75 || tangentLength > 1.25)
+                throw new InvalidOperationException($"Geometry.TryGetPointAndTangentAtDistance produced an unexpected tangent: {pathTangent}.");
+
             if (!path.TryGetSegment(12, 100, true, out var segment))
                 throw new InvalidOperationException("Geometry.TryGetSegment returned false in offscreen smoke.");
+            var segmentLength = segment.ContourLength;
+            if (segmentLength < 70 || segmentLength > 105)
+                throw new InvalidOperationException($"Geometry.TryGetSegment produced an unexpected length: {segmentLength}.");
             context.DrawGeometry(null, new Pen(Brushes.Black, 2), segment);
 
             var text = new FormattedText(

@@ -12,12 +12,28 @@ namespace MIR.Direct2D1ForAvalonia.Media
     internal abstract class GeometryImpl(ID2D1Geometry geometry) : IGeometryImpl
     {
         private const float ContourApproximation = 0.0001f;
+        private const double SegmentFlatnessTolerance = 0.125;
+        private const double SegmentLengthTolerance = 0.125;
+        private const int MaxSegmentLineCount = 4096;
+        private const int MaxSegmentSubdivisionDepth = 16;
+        private double _contourLength = double.NaN;
 
         /// <inheritdoc/>
         public Rect Bounds => Geometry.GetWidenedBounds(0).ToAvalonia();
 
         /// <inheritdoc />
-        public double ContourLength => Geometry.ComputeLength(null, ContourApproximation);
+        public double ContourLength
+        {
+            get
+            {
+                if (double.IsNaN(_contourLength))
+                {
+                    _contourLength = Geometry.ComputeLength(null, ContourApproximation);
+                }
+
+                return _contourLength;
+            }
+        }
 
         public ID2D1Geometry Geometry { get; } = geometry;
 
@@ -93,40 +109,18 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <inheritdoc />
         public bool TryGetPointAtDistance(double distance, out Point point)
         {
-            Geometry.ComputePointAtLength((float)distance, ContourApproximation, out var tangentVector);
-            point = new Point(tangentVector.X, tangentVector.Y);
-            return true;
+            var p = Geometry.ComputePointAtLength((float)distance, ContourApproximation, out _);
+            point = new Point(p.X, p.Y);
+            return IsFinite(p);
         }
 
         /// <inheritdoc />
         public bool TryGetPointAndTangentAtDistance(double distance, out Point point, out Point tangent)
         {
-            // The native ID2D1Geometry::ComputePointAtLength exposes a unit-tangent output,
-            // but Vortice's binding drops it (it only returns the point). Approximate the
-            // tangent by differencing two points straddling the requested length. The step is
-            // tiny relative to ContourApproximation so the result is effectively the unit
-            // tangent for smooth segments.
-            Geometry.ComputePointAtLength((float)distance, ContourApproximation, out var p);
+            var p = Geometry.ComputePointAtLength((float)distance, ContourApproximation, out var tangentVector);
             point = new Point(p.X, p.Y);
-
-            const float tangentEpsilon = 0.001f;
-            Geometry.ComputePointAtLength((float)(distance + tangentEpsilon), ContourApproximation, out var pNext);
-
-            var dx = pNext.X - p.X;
-            var dy = pNext.Y - p.Y;
-            var len = Math.Sqrt((dx * dx) + (dy * dy));
-            if (len < float.Epsilon)
-            {
-                // Degenerate (end of contour or cusp): fall back to the previous point so the
-                // direction is still meaningful when the forward difference vanishes.
-                Geometry.ComputePointAtLength((float)Math.Max(distance - tangentEpsilon, 0), ContourApproximation, out var pPrev);
-                dx = p.X - pPrev.X;
-                dy = p.Y - pPrev.Y;
-                len = Math.Sqrt((dx * dx) + (dy * dy));
-            }
-
-            tangent = len >= float.Epsilon ? new Point(dx / len, dy / len) : new Point(1, 0);
-            return true;
+            tangent = new Point(tangentVector.X, tangentVector.Y);
+            return IsFinite(p) && IsFinite(tangentVector);
         }
 
         public bool TryGetSegment(double startDistance, double stopDistance, bool startOnBeginFigure, out IGeometryImpl segmentGeometry)
@@ -146,28 +140,37 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 return false;
             }
 
+            var startPoint = ComputePointAtDistance(start);
+            var stopPoint = ComputePointAtDistance(stop);
+            if (!IsFinite(startPoint) || !IsFinite(stopPoint))
+            {
+                segmentGeometry = null!;
+                return false;
+            }
+
             var result = Direct2D1Platform.Direct2D1Factory.CreatePathGeometry();
             try
             {
                 using (var sink = result.Open())
                 {
-                    Geometry.ComputePointAtLength((float)start, ContourApproximation, out var startPoint);
                     sink.BeginFigure(startPoint, FigureBegin.Hollow);
 
-                    var length = stop - start;
-                    var segmentCount = Math.Clamp((int)Math.Ceiling(length / 0.5), 1, 4096);
                     var previousPoint = startPoint;
+                    var lineCount = 0;
 
-                    for (var i = 1; i <= segmentCount; i++)
+                    AddSegmentLines(
+                        sink,
+                        start,
+                        startPoint,
+                        stop,
+                        stopPoint,
+                        depth: 0,
+                        ref previousPoint,
+                        ref lineCount);
+
+                    if (lineCount == 0 || !AreClose(previousPoint, stopPoint))
                     {
-                        var distance = start + (length * i / segmentCount);
-                        Geometry.ComputePointAtLength((float)distance, ContourApproximation, out var point);
-
-                        if (!AreClose(previousPoint, point))
-                        {
-                            sink.AddLine(point);
-                            previousPoint = point;
-                        }
+                        sink.AddLine(stopPoint);
                     }
 
                     sink.EndFigure(FigureEnd.Open);
@@ -186,8 +189,128 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         protected virtual ID2D1Geometry GetSourceGeometry() => Geometry;
 
+        private void AddSegmentLines(
+            ID2D1GeometrySink sink,
+            double startDistance,
+            Vector2 startPoint,
+            double stopDistance,
+            Vector2 stopPoint,
+            int depth,
+            ref Vector2 previousPoint,
+            ref int lineCount)
+        {
+            if (ShouldSplitSegment(startDistance, startPoint, stopDistance, stopPoint, depth, lineCount, out var midDistance, out var midPoint))
+            {
+                AddSegmentLines(
+                    sink,
+                    startDistance,
+                    startPoint,
+                    midDistance,
+                    midPoint,
+                    depth + 1,
+                    ref previousPoint,
+                    ref lineCount);
+                AddSegmentLines(
+                    sink,
+                    midDistance,
+                    midPoint,
+                    stopDistance,
+                    stopPoint,
+                    depth + 1,
+                    ref previousPoint,
+                    ref lineCount);
+                return;
+            }
+
+            AddLine(sink, stopPoint, ref previousPoint, ref lineCount);
+        }
+
+        private bool ShouldSplitSegment(
+            double startDistance,
+            Vector2 startPoint,
+            double stopDistance,
+            Vector2 stopPoint,
+            int depth,
+            int lineCount,
+            out double midDistance,
+            out Vector2 midPoint)
+        {
+            if (depth >= MaxSegmentSubdivisionDepth || lineCount >= MaxSegmentLineCount)
+            {
+                midDistance = 0;
+                midPoint = default;
+                return false;
+            }
+
+            midDistance = (startDistance + stopDistance) * 0.5;
+            midPoint = ComputePointAtDistance(midDistance);
+            if (!IsFinite(midPoint))
+            {
+                return false;
+            }
+
+            var length = stopDistance - startDistance;
+            var chordLength = Distance(startPoint, stopPoint);
+            var lengthError = Math.Max(0, length - chordLength);
+            if (lengthError > SegmentLengthTolerance)
+            {
+                return true;
+            }
+
+            return DistanceToLineSegment(midPoint, startPoint, stopPoint) > SegmentFlatnessTolerance;
+        }
+
+        private static void AddLine(
+            ID2D1GeometrySink sink,
+            Vector2 point,
+            ref Vector2 previousPoint,
+            ref int lineCount)
+        {
+            if (lineCount >= MaxSegmentLineCount)
+            {
+                return;
+            }
+
+            if (!AreClose(previousPoint, point))
+            {
+                sink.AddLine(point);
+                previousPoint = point;
+                lineCount++;
+            }
+        }
+
         private static bool AreClose(Vector2 left, Vector2 right)
             => Math.Abs(left.X - right.X) < ContourApproximation &&
                Math.Abs(left.Y - right.Y) < ContourApproximation;
+
+        private Vector2 ComputePointAtDistance(double distance)
+            => Geometry.ComputePointAtLength((float)distance, ContourApproximation, out _);
+
+        private static bool IsFinite(Vector2 point)
+            => float.IsFinite(point.X) && float.IsFinite(point.Y);
+
+        private static double Distance(Vector2 left, Vector2 right)
+        {
+            var dx = left.X - right.X;
+            var dy = left.Y - right.Y;
+            return Math.Sqrt((dx * dx) + (dy * dy));
+        }
+
+        private static double DistanceToLineSegment(Vector2 point, Vector2 start, Vector2 end)
+        {
+            var dx = end.X - start.X;
+            var dy = end.Y - start.Y;
+            var lengthSquared = (dx * dx) + (dy * dy);
+
+            if (lengthSquared < float.Epsilon)
+            {
+                return Distance(point, start);
+            }
+
+            var t = (((point.X - start.X) * dx) + ((point.Y - start.Y) * dy)) / lengthSquared;
+            t = Math.Clamp(t, 0, 1);
+
+            return Distance(point, new Vector2((float)(start.X + (dx * t)), (float)(start.Y + (dy * t))));
+        }
     }
 }
