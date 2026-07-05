@@ -30,7 +30,9 @@ internal sealed record TestCase(
     CaseTier Tier,
     sbyte BidiLevel = 0,
     string Culture = "en-US",
-    IReadOnlyList<AvaloniaFontFeature>? Features = null);
+    IReadOnlyList<AvaloniaFontFeature>? Features = null,
+    string MemoryPrefix = "",
+    string MemorySuffix = "");
 
 internal sealed record GlyphDump(ushort GlyphIndex, int GlyphCluster, double GlyphAdvance, double OffsetX, double OffsetY);
 
@@ -216,8 +218,9 @@ internal static class Program
             : new TextShaperOptions(glyphTypeface, 32.0, bidiLevel, culture, 0, 0, features);
 
         var shaperDWrite = new DirectWriteTextShaper();
-        var dwBuffer = shaperDWrite.ShapeText(testCase.Text.AsMemory(), shaperOptions);
-        var hbBuffer = HarfBuzzShaper.ShapeText(testCase.Text.AsMemory(), hbFont, glyphTypeface, shaperOptions.FontRenderingEmSize, bidiLevel, culture, features);
+        var textMemory = CreateInputMemory(testCase);
+        var dwBuffer = shaperDWrite.ShapeText(textMemory, shaperOptions);
+        var hbBuffer = HarfBuzzShaper.ShapeText(textMemory, hbFont, glyphTypeface, shaperOptions.FontRenderingEmSize, bidiLevel, culture, features);
 
         var directWriteGlyphs = dwBuffer
             .Select(g => new GlyphDump(g.GlyphIndex, g.GlyphCluster, g.GlyphAdvance, g.GlyphOffset.X, g.GlyphOffset.Y))
@@ -230,7 +233,7 @@ internal static class Program
         File.WriteAllText(Path.Combine(outDir, $"{prefix}_DW.json"), JsonSerializer.Serialize(directWriteGlyphs, JsonOptions()));
         File.WriteAllText(Path.Combine(outDir, $"{prefix}_HB.json"), JsonSerializer.Serialize(harfBuzzGlyphs, JsonOptions()));
 
-        var passed = TryCompareGlyphRuns(directWriteGlyphs, harfBuzzGlyphs, bidiLevel, epsilon, out var mismatch);
+        var passed = TryCompareGlyphRuns(directWriteGlyphs, harfBuzzGlyphs, bidiLevel, textMemory.Span, epsilon, out var mismatch);
 
         string? dwImage = null;
         string? hbImage = null;
@@ -407,10 +410,17 @@ internal static class Program
         IReadOnlyList<GlyphDump> directWriteGlyphs,
         IReadOnlyList<GlyphDump> harfBuzzGlyphs,
         sbyte bidiLevel,
+        ReadOnlySpan<char> text,
         double epsilon,
         out string mismatch)
     {
         mismatch = string.Empty;
+
+        if (!TryValidateClusters("DW", directWriteGlyphs, text.Length, out mismatch) ||
+            !TryValidateClusters("HB", harfBuzzGlyphs, text.Length, out mismatch))
+        {
+            return false;
+        }
 
         if (directWriteGlyphs.Count != harfBuzzGlyphs.Count)
         {
@@ -444,18 +454,50 @@ internal static class Program
             // Visible glyphs (e.g. tabs and middle line breaks) still require exact id and
             // cluster matches.
             var significant = Math.Abs(dwAdvance) > epsilon || Math.Abs(hbAdvance) > epsilon;
+            var invisibleBreakGlyph =
+                !significant &&
+                IsBreakCluster(text, dw.GlyphCluster) &&
+                IsBreakCluster(text, hb.GlyphCluster);
 
             if ((significant && dw.GlyphIndex != hb.GlyphIndex)
                 || (significant && dw.GlyphCluster != hb.GlyphCluster)
                 || Math.Abs(dwAdvance - hbAdvance) > epsilon
-                || Math.Abs(dw.OffsetX - hb.OffsetX) > epsilon
-                || Math.Abs(dw.OffsetY - hb.OffsetY) > epsilon)
+                || (!invisibleBreakGlyph && Math.Abs(dw.OffsetX - hb.OffsetX) > epsilon)
+                || (!invisibleBreakGlyph && Math.Abs(dw.OffsetY - hb.OffsetY) > epsilon))
             {
                 mismatch = $"Mismatch at glyph {i}. DW=[id:{dw.GlyphIndex}, cluster:{dw.GlyphCluster}, adv:{dw.GlyphAdvance:0.######}, off:({dw.OffsetX:0.######},{dw.OffsetY:0.######})], HB=[id:{hb.GlyphIndex}, cluster:{hb.GlyphCluster}, adv:{hb.GlyphAdvance:0.######}, off:({hb.OffsetX:0.######},{hb.OffsetY:0.######})]";
                 return false;
             }
         }
 
+        return true;
+    }
+
+    private static bool IsBreakCluster(ReadOnlySpan<char> text, int cluster)
+    {
+        if ((uint)cluster >= (uint)text.Length)
+            return false;
+
+        return text[cluster] is '\r' or '\n';
+    }
+
+    private static bool TryValidateClusters(
+        string label,
+        IReadOnlyList<GlyphDump> glyphs,
+        int textLength,
+        out string mismatch)
+    {
+        for (var i = 0; i < glyphs.Count; i++)
+        {
+            var cluster = glyphs[i].GlyphCluster;
+            if (cluster < 0 || cluster >= textLength)
+            {
+                mismatch = $"{label} cluster out of range at glyph {i}: cluster={cluster}, textLength={textLength}";
+                return false;
+            }
+        }
+
+        mismatch = string.Empty;
         return true;
     }
 
@@ -470,6 +512,7 @@ internal static class Program
         // emoji font's GPOS kern table differently. The glyph ids and clusters match exactly;
         // only the space advance differs by a sub-pixel amount. The kern-off sibling passes.
         ["Surrogate Pair (Emoji kerning)"] = "Engine-level GPOS kern divergence (glyph ids/clusters match; only the space advance differs).",
+        ["RTL Trailing CRLF"] = "Invisible zero-advance trailing break glyph offset differs in RTL; glyph id, cluster and advance match.",
     };
 
     private static bool IsKnownDivergence(string name, out string reason)
@@ -522,13 +565,41 @@ internal static class Program
             new TestCase("Line Break LF", "AB\n", "segoeui.ttf", CaseTier.Tier1),
             new TestCase("Line Break CRLF", "AB\r\n", "segoeui.ttf", CaseTier.Tier1),
             new TestCase("Line Break CR", "AB\r", "segoeui.ttf", CaseTier.Tier1),
+            new TestCase("Line Break CRLF slice", "AB\r\n", "segoeui.ttf", CaseTier.Tier1, MemoryPrefix: "xx", MemorySuffix: "yy"),
+            new TestCase("Line Break LF slice", "AB\n", "segoeui.ttf", CaseTier.Tier1, MemoryPrefix: "xx", MemorySuffix: "yy"),
+            new TestCase("Line Break CR slice", "AB\r", "segoeui.ttf", CaseTier.Tier1, MemoryPrefix: "xx", MemorySuffix: "yy"),
             new TestCase("Mid Break CRLF", "Line1\r\nLine2", "segoeui.ttf", CaseTier.Tier2),
+            new TestCase("Mid Break CRLF slice", "Line1\r\nLine2", "segoeui.ttf", CaseTier.Tier2, MemoryPrefix: "[[", MemorySuffix: "]]"),
+            new TestCase("Leading CRLF", "\r\nLine", "segoeui.ttf", CaseTier.Tier2),
+            new TestCase("Consecutive CRLF", "A\r\n\r\nB", "segoeui.ttf", CaseTier.Tier2),
+            new TestCase("Tab Before CRLF", "A\t\r\n", "segoeui.ttf", CaseTier.Tier2),
+            new TestCase("Mixed Breaks", "A\rB\nC\r\n", "segoeui.ttf", CaseTier.Tier2),
+            new TestCase("RTL Trailing CRLF", "שלום\r\n", "arial.ttf", CaseTier.Tier2, 1, "he-IL"),
+            new TestCase(
+                "Emoji Trailing CRLF slice",
+                "Hi \uD83D\uDE00\r\n",
+                "seguiemj.ttf",
+                CaseTier.Tier2,
+                Features: [AvaloniaFontFeature.Parse("kern=0")],
+                MemoryPrefix: "<",
+                MemorySuffix: ">"),
             new TestCase("CJK Chinese", "你好世界", "msyh.ttc", CaseTier.Tier1, Culture: "zh-CN"),
             new TestCase("CJK Japanese", "こんにちは世界", "msgothic.ttc", CaseTier.Tier1, Culture: "ja-JP"),
             new TestCase("CJK Korean", "안녕하세요 세계", "malgun.ttf", CaseTier.Tier1, Culture: "ko-KR"),
             new TestCase("Surrogate Pair (Emoji kerning)", "Hello \uD83D\uDE00 World", "seguiemj.ttf", CaseTier.Tier2),
             new TestCase("Mixed Script Digits", "Invoice ١٢٣-ABC", "segoeui.ttf", CaseTier.Tier2)
         ];
+    }
+
+    private static ReadOnlyMemory<char> CreateInputMemory(TestCase testCase)
+    {
+        if (testCase.MemoryPrefix.Length == 0 && testCase.MemorySuffix.Length == 0)
+        {
+            return testCase.Text.AsMemory();
+        }
+
+        var containingText = string.Concat(testCase.MemoryPrefix, testCase.Text, testCase.MemorySuffix);
+        return containingText.AsMemory(testCase.MemoryPrefix.Length, testCase.Text.Length);
     }
 
     private static List<TestCase> FilterCases(IEnumerable<TestCase> cases, string? caseName)

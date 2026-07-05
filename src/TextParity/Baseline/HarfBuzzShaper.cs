@@ -75,12 +75,15 @@ namespace TextParity.Baseline
                 {
                     var sourceInfo = glyphInfos[i];
                     var glyphIndex = (ushort)sourceInfo.Codepoint;
-                    var glyphCluster = (int)(sourceInfo.Cluster);
+                    var containingCluster = (int)sourceInfo.Cluster;
+                    var glyphCluster = containingCluster - start;
                     
                     var glyphAdvance = GetGlyphAdvance(glyphPositions, i, textScale) + letterSpacing;
                     var glyphOffset = GetGlyphOffset(glyphPositions, i, textScale);
 
-                    if (glyphCluster < containingText.Length && containingText[glyphCluster] == '\t')
+                    if (containingCluster >= 0 &&
+                        containingCluster < containingText.Length &&
+                        containingText[containingCluster] == '\t')
                     {
                         glyphIndex = typeface.CharacterToGlyphMap[' '];
                         glyphAdvance = incrementalTabWidth > 0 ?
