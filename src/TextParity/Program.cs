@@ -51,6 +51,14 @@ internal sealed record CaseResult(
     string? HarfBuzzImage = null,
     string? CompareImage = null);
 
+internal sealed record RunSummary(
+    IReadOnlyList<CaseResult> Results,
+    int Passed,
+    int Tier1Failures,
+    int Tier2Failures,
+    int Known,
+    int Skipped);
+
 internal static class Program
 {
     private const double DefaultEpsilon = 0.01;
@@ -65,7 +73,21 @@ internal static class Program
             return 2;
         }
 
-        Console.WriteLine("Initializing MIR.Direct2D1ForAvalonia Platform...");
+        try
+        {
+            var summary = Run(options, Console.Out);
+            return summary.Tier1Failures == 0 ? 0 : 1;
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 2;
+        }
+    }
+
+    internal static RunSummary Run(CliOptions options, TextWriter output)
+    {
+        output.WriteLine("Initializing MIR.Direct2D1ForAvalonia Platform...");
         Direct2D1Platform.InitializeDirect2D();
         MIR.DirectWriteForAvalonia.DirectWritePlatform.InitializeDirectWrite();
 
@@ -79,8 +101,7 @@ internal static class Program
         var selectedCases = FilterCases(allCases, options.CaseName);
         if (selectedCases.Count == 0)
         {
-            Console.Error.WriteLine($"No test case matched '{options.CaseName}'.");
-            return 2;
+            throw new ArgumentException($"No test case matched '{options.CaseName}'.");
         }
 
         var globalFeatures = ParseFeatures(options.FeaturesRaw);
@@ -98,12 +119,12 @@ internal static class Program
             var effectiveFeatures = globalFeatures ?? testCase.Features ?? Array.Empty<AvaloniaFontFeature>();
             var fontPath = ResolveFontPath(fontsDir, testCase.DefaultFontFile, options.FontFile, options.FontFamily);
 
-            Console.WriteLine($"Testing: {testCase.Name}");
+            output.WriteLine($"Testing: {testCase.Name}");
 
             if (fontPath is null || !File.Exists(fontPath))
             {
                 var missing = options.FontFile ?? options.FontFamily ?? testCase.DefaultFontFile;
-                Console.WriteLine($"  SKIP (Font not found: {missing})");
+                output.WriteLine($"  SKIP (Font not found: {missing})");
                 results.Add(new CaseResult(
                     testCase.Name,
                     testCase.Tier,
@@ -152,7 +173,7 @@ internal static class Program
             var isKnown = !caseResult.Passed && !caseResult.Skipped
                 && IsKnownDivergence(caseResult.Name, out knownReason);
 
-            Console.WriteLine(caseResult.Passed
+            output.WriteLine(caseResult.Passed
                 ? "  PASS"
                 : caseResult.Skipped
                     ? $"  SKIP: {caseResult.Message}"
@@ -171,11 +192,11 @@ internal static class Program
         var skipped = results.Count(x => x.Skipped);
         var known = results.Count(x => !x.Passed && !x.Skipped && IsKnownDivergence(x.Name, out _));
 
-        Console.WriteLine();
-        Console.WriteLine($"Done. Passed: {passed}, Failed Tier1: {tier1Failures}, Failed Tier2: {tier2Failures}, Known: {known}, Skipped: {skipped}");
-        Console.WriteLine($"Report: {reportPath}");
+        output.WriteLine();
+        output.WriteLine($"Done. Passed: {passed}, Failed Tier1: {tier1Failures}, Failed Tier2: {tier2Failures}, Known: {known}, Skipped: {skipped}");
+        output.WriteLine($"Report: {reportPath}");
 
-        return tier1Failures == 0 ? 0 : 1;
+        return new RunSummary(results, passed, tier1Failures, tier2Failures, known, skipped);
     }
 
     private static CaseResult RunCase(
@@ -429,13 +450,6 @@ internal static class Program
         }
 
         var rtl = (bidiLevel & 1) != 0;
-
-        Console.WriteLine($"--- Diagnostic Dump ---");
-        Console.WriteLine($"rtl={rtl}, Length={directWriteGlyphs.Count}");
-        for (int i=0; i<directWriteGlyphs.Count; i++) {
-            Console.WriteLine($"  {i}: DW=[{directWriteGlyphs[i].GlyphIndex}, cl:{directWriteGlyphs[i].GlyphCluster}]  HB=[{harfBuzzGlyphs[i].GlyphIndex}, cl:{harfBuzzGlyphs[i].GlyphCluster}]");
-        }
-        Console.WriteLine($"-----------------------");
 
         for (var i = 0; i < directWriteGlyphs.Count; i++)
         {
@@ -875,7 +889,7 @@ internal static class Program
         Console.WriteLine($"  --render-dpi <float> (default: {DefaultRenderDpi:0.#})");
     }
 
-    private sealed record CliOptions(
+    internal sealed record CliOptions(
         string? FontFile = null,
         string? FontFamily = null,
         string? Culture = null,
