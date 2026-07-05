@@ -5,7 +5,7 @@
     <PackageId>MIR.DirectWriteForAvalonia</PackageId>
     <RootNamespace>MIR.DirectWriteForAvalonia</RootNamespace>
     <Title>MIR.DirectWriteForAvalonia</Title>
-    <Version>12.0.0.1</Version>
+    <Version>12.0.0.2</Version>
     <Description>DirectWrite text shaping backend for Avalonia 12 on Windows, maintained as an independent derivative.</Description>
     <PackageTags>Avalonia;DirectWrite;TextShaping;Win32</PackageTags>
   </PropertyGroup>
