@@ -5,6 +5,7 @@
     <Project Path="AotSmoke/AotSmoke.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="AotSmoke.Tests/AotSmoke.Tests.csproj" />
     <Project Path="TextParity.Tests/TextParity.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/">
