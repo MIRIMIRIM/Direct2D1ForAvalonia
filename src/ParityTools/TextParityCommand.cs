@@ -12,10 +12,10 @@ using MIR.DirectWriteForAvalonia;
 using Avalonia.Media;
 using Avalonia.Media.TextFormatting;
 using Vortice.DirectWrite;
-using TextParity.Baseline;
+using ParityTools.Baseline;
 using AvaloniaFontFeature = Avalonia.Media.FontFeature;
 
-namespace TextParity;
+namespace ParityTools;
 
 internal enum CaseTier
 {
@@ -68,31 +68,10 @@ internal sealed record RunSummary(
     int Known,
     int Skipped);
 
-internal static class Program
+internal static class TextParityCommand
 {
     private const double DefaultEpsilon = 0.01;
     private const double DefaultRenderDpi = 384.0;
-
-    public static int Main(string[] args)
-    {
-        if (!TryParseArguments(args, out var options, out var parseError))
-        {
-            Console.Error.WriteLine(parseError);
-            PrintUsage();
-            return 2;
-        }
-
-        try
-        {
-            var summary = Run(options, Console.Out);
-            return summary.Tier1Failures == 0 ? 0 : 1;
-        }
-        catch (ArgumentException ex)
-        {
-            Console.Error.WriteLine(ex.Message);
-            return 2;
-        }
-    }
 
     internal static RunSummary Run(CliOptions options, TextWriter output)
     {
@@ -873,94 +852,6 @@ internal static class Program
 
             return new string(chars, 0, (int)pathLength);
         }
-    }
-
-    private static bool TryParseArguments(string[] args, out CliOptions options, out string error)
-    {
-        options = new CliOptions();
-        error = string.Empty;
-
-        for (var i = 0; i < args.Length; i++)
-        {
-            var arg = args[i];
-            string NextValue()
-            {
-                if (i + 1 >= args.Length)
-                    throw new ArgumentException($"Missing value for {arg}");
-                i++;
-                return args[i];
-            }
-
-            try
-            {
-                switch (arg)
-                {
-                    case "--font-file":
-                        options = options with { FontFile = NextValue() };
-                        break;
-                    case "--font-family":
-                        options = options with { FontFamily = NextValue() };
-                        break;
-                    case "--culture":
-                        options = options with { Culture = NextValue() };
-                        break;
-                    case "--bidi":
-                        options = options with { BidiLevel = sbyte.Parse(NextValue(), CultureInfo.InvariantCulture) };
-                        break;
-                    case "--features":
-                        options = options with { FeaturesRaw = NextValue() };
-                        break;
-                    case "--case":
-                        options = options with { CaseName = NextValue() };
-                        break;
-                    case "--out-dir":
-                        options = options with { OutDir = Path.GetFullPath(NextValue()) };
-                        break;
-                    case "--report":
-                        options = options with { ReportPath = Path.GetFullPath(NextValue()) };
-                        break;
-                    case "--epsilon":
-                        options = options with { Epsilon = double.Parse(NextValue(), CultureInfo.InvariantCulture) };
-                        break;
-                    case "--render":
-                        options = options with { RenderImages = true };
-                        break;
-                    case "--render-dpi":
-                        options = options with { RenderDpi = double.Parse(NextValue(), CultureInfo.InvariantCulture) };
-                        break;
-                    case "--help":
-                    case "-h":
-                        PrintUsage();
-                        Environment.Exit(0);
-                        break;
-                    default:
-                        throw new ArgumentException($"Unknown argument: {arg}");
-                }
-            }
-            catch (Exception ex)
-            {
-                error = ex.Message;
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static void PrintUsage()
-    {
-        Console.WriteLine("TextParity options:");
-        Console.WriteLine("  --font-file <path-or-font-file-name>");
-        Console.WriteLine("  --font-family <installed-family-name>");
-        Console.WriteLine("  --culture <culture-name>");
-        Console.WriteLine("  --bidi <sbyte-level>");
-        Console.WriteLine("  --features <feature1;feature2>");
-        Console.WriteLine("  --case <case-name-contains>");
-        Console.WriteLine("  --out-dir <directory>");
-        Console.WriteLine("  --report <report-path>");
-        Console.WriteLine("  --epsilon <float>");
-        Console.WriteLine("  --render (emit PNG comparison images for Tier-2 and failing cases)");
-        Console.WriteLine($"  --render-dpi <float> (default: {DefaultRenderDpi:0.#})");
     }
 
     internal sealed record CliOptions(

@@ -53,7 +53,8 @@ try {
 
     if (-not $SkipTextParityCli) {
         Invoke-ValidationStep "TextParity CLI" {
-            dotnet run --project src\TextParity\TextParity.csproj -c $Configuration --no-build -- `
+            dotnet run --project src\ParityTools\ParityTools.csproj -c $Configuration --no-build -- `
+                text `
                 --report (Join-Path $artifacts "textparity-report.md") `
                 --out-dir (Join-Path $artifacts "textparity")
         }
@@ -70,7 +71,8 @@ try {
 
     if ($RunRenderParity) {
         Invoke-ValidationStep "Render parity smoke" {
-            dotnet run --project src\RenderParity\RenderParity.csproj -c $Configuration --no-build -- `
+            dotnet run --project src\ParityTools\ParityTools.csproj -c $Configuration --no-build -- `
+                render `
                 --out-dir (Join-Path $artifacts "renderparity") `
                 --report-json (Join-Path $artifacts "renderparity-report.json")
         }

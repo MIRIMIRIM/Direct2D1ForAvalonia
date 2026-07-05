@@ -12,7 +12,7 @@ using HarfBuzzSharp;
 using Buffer = HarfBuzzSharp.Buffer;
 using GlyphInfo = HarfBuzzSharp.GlyphInfo;
 
-namespace TextParity.Baseline
+namespace ParityTools.Baseline
 {
     /// <summary>
     /// Baseline HarfBuzz shaping logic adapted from:

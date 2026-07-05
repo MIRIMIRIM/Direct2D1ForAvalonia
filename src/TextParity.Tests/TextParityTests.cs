@@ -1,3 +1,5 @@
+using ParityTools;
+
 namespace TextParity.Tests;
 
 [TestClass]
@@ -24,8 +26,8 @@ public sealed class TextParityTests
         var outputDirectory = Path.Combine(runRoot, "out");
         var reportPath = Path.Combine(runRoot, "report.md");
 
-        var summary = Program.Run(
-            new Program.CliOptions(
+        var summary = TextParityCommand.Run(
+            new TextParityCommand.CliOptions(
                 OutDir: outputDirectory,
                 ReportPath: reportPath),
             TextWriter.Null);

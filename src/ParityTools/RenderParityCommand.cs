@@ -10,17 +10,23 @@ using Avalonia.Win32;
 using MIR.Direct2D1ForAvalonia;
 using MIR.DirectWriteForAvalonia;
 
-if (!OperatingSystem.IsWindows())
-    throw new PlatformNotSupportedException("RenderParity targets Windows only.");
+namespace ParityTools;
 
-var options = RenderParityOptions.Parse(args);
-if (options.Backend is null)
+internal static class RenderParityCommand
 {
-    return RunController(options);
-}
+public static int Run(RenderParityOptions options)
+{
+    if (!OperatingSystem.IsWindows())
+        throw new PlatformNotSupportedException("Render parity targets Windows only.");
 
-RunRenderer(options);
-return 0;
+    if (options.Backend is null)
+    {
+        return RunController(options);
+    }
+
+    RunRenderer(options);
+    return 0;
+}
 
 static int RunController(RenderParityOptions options)
 {
@@ -83,6 +89,7 @@ static void RunBackend(string exePath, string backend, string scene, string pngP
         RedirectStandardError = true
     };
 
+    psi.ArgumentList.Add("render-worker");
     psi.ArgumentList.Add("--backend");
     psi.ArgumentList.Add(backend);
     psi.ArgumentList.Add("--scene");
@@ -186,6 +193,7 @@ static string SanitizeFileName(string name)
     var invalid = Path.GetInvalidFileNameChars();
     var chars = name.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray();
     return new string(chars).Replace(' ', '_');
+}
 }
 
 internal sealed class RenderParityApp : Application
@@ -345,78 +353,7 @@ internal sealed record RenderParityOptions(
     string? RawPath,
     int PixelTolerance,
     double MaxMeanChannelDelta,
-    double MaxPixelsOverTolerancePercent)
-{
-    public static RenderParityOptions Parse(string[] args)
-    {
-        string? backend = null;
-        string? outputDirectory = null;
-        string? reportJson = null;
-        string? pngPath = null;
-        string? rawPath = null;
-        var pixelTolerance = 64;
-        var maxMeanChannelDelta = 8.0;
-        var maxPixelsOverTolerancePercent = 5.0;
-        var scenes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        for (var i = 0; i < args.Length; i++)
-        {
-            var arg = args[i];
-            string NextValue()
-            {
-                if (i + 1 >= args.Length)
-                    throw new ArgumentException($"Missing value for {arg}");
-                i++;
-                return args[i];
-            }
-
-            switch (arg)
-            {
-                case "--backend":
-                    backend = NextValue();
-                    break;
-                case "--scene":
-                    foreach (var part in NextValue().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-                        scenes.Add(part);
-                    break;
-                case "--out-dir":
-                    outputDirectory = Path.GetFullPath(NextValue());
-                    break;
-                case "--report-json":
-                    reportJson = Path.GetFullPath(NextValue());
-                    break;
-                case "--png":
-                    pngPath = Path.GetFullPath(NextValue());
-                    break;
-                case "--raw":
-                    rawPath = Path.GetFullPath(NextValue());
-                    break;
-                case "--pixel-tolerance":
-                    pixelTolerance = int.Parse(NextValue(), CultureInfo.InvariantCulture);
-                    break;
-                case "--max-mean-delta":
-                    maxMeanChannelDelta = double.Parse(NextValue(), CultureInfo.InvariantCulture);
-                    break;
-                case "--max-pixels-over-tolerance-percent":
-                    maxPixelsOverTolerancePercent = double.Parse(NextValue(), CultureInfo.InvariantCulture);
-                    break;
-                default:
-                    throw new ArgumentException($"Unknown argument: {arg}");
-            }
-        }
-
-        return new RenderParityOptions(
-            backend,
-            scenes,
-            outputDirectory,
-            reportJson,
-            pngPath,
-            rawPath,
-            pixelTolerance,
-            maxMeanChannelDelta,
-            maxPixelsOverTolerancePercent);
-    }
-}
+    double MaxPixelsOverTolerancePercent);
 
 internal sealed class RawFramebuffer : ILockedFramebuffer
 {
