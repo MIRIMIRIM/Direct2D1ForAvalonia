@@ -18,8 +18,7 @@ if (!OperatingSystem.IsWindows())
 
 TryStabilizeProcessScheduling();
 
-var outputJson = ParseOutputPath(args);
-var caseFilters = ParseCaseFilters(args);
+var options = BenchmarkOptions.Parse(args);
 
 var benchmarkCases = new (string Name, Func<BenchmarkResult> Run)[]
 {
@@ -40,10 +39,18 @@ var benchmarkCases = new (string Name, Func<BenchmarkResult> Run)[]
     ("FramebufferCopy.Loop 4352->4096", () => RunFramebufferCopyCase_Loop("FramebufferCopy.Loop 4352->4096", 1080, 4352, 4096, 5000)),
 };
 
+if (options.ListCases)
+{
+    foreach (var benchmarkCase in benchmarkCases)
+        Console.WriteLine(benchmarkCase.Name);
+
+    return 0;
+}
+
 var selectedCases = new List<(string Name, Func<BenchmarkResult> Run)>();
 foreach (var benchmarkCase in benchmarkCases)
 {
-    if (caseFilters.Count > 0 && !caseFilters.Contains(benchmarkCase.Name))
+    if (options.CaseFilters.Count > 0 && !options.CaseFilters.Contains(benchmarkCase.Name))
         continue;
 
     selectedCases.Add(benchmarkCase);
@@ -76,47 +83,36 @@ foreach (var benchmarkCase in selectedCases)
 
 var payload = new BenchmarkRun(
     DateTimeOffset.UtcNow,
-    Environment.MachineName,
-    Environment.ProcessPath ?? "unknown",
+    $"{RuntimeInformation.OSArchitecture}/{RuntimeInformation.ProcessArchitecture}",
+    Path.GetFileName(Environment.ProcessPath) ?? "unknown",
     results);
 
-var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
-if (!string.IsNullOrWhiteSpace(outputJson))
+var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+var json = JsonSerializer.Serialize(payload, jsonOptions);
+if (!string.IsNullOrWhiteSpace(options.OutputJson))
 {
-    Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputJson)) ?? ".");
-    File.WriteAllText(outputJson, json);
+    Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(options.OutputJson)) ?? ".");
+    File.WriteAllText(options.OutputJson, json);
 }
 
 Console.WriteLine(json);
 
-static string? ParseOutputPath(string[] args)
+if (!string.IsNullOrWhiteSpace(options.BaselineJson))
 {
-    for (var i = 0; i < args.Length - 1; i++)
+    var baseline = ReadBenchmarkRun(options.BaselineJson);
+    var comparison = CompareBenchmarkRuns(baseline, payload, options.MaxRegressionPercent);
+    PrintComparison(comparison);
+
+    if (!string.IsNullOrWhiteSpace(options.ComparisonJson))
     {
-        if (string.Equals(args[i], "--json", StringComparison.OrdinalIgnoreCase))
-            return args[i + 1];
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(options.ComparisonJson)) ?? ".");
+        File.WriteAllText(options.ComparisonJson, JsonSerializer.Serialize(comparison, jsonOptions));
     }
 
-    return null;
+    return comparison.Passed ? 0 : 1;
 }
 
-static HashSet<string> ParseCaseFilters(string[] args)
-{
-    var filters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-    for (var i = 0; i < args.Length - 1; i++)
-    {
-        if (!string.Equals(args[i], "--case", StringComparison.OrdinalIgnoreCase))
-            continue;
-
-        foreach (var part in args[i + 1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            filters.Add(part);
-        }
-    }
-
-    return filters;
-}
+return 0;
 
 static void TryStabilizeProcessScheduling()
 {
@@ -136,7 +132,7 @@ static void TryStabilizeProcessScheduling()
 BenchmarkResult RunTextShaperCase(int textLength, int iterations, int repeats)
 {
     var fontPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Fonts", "segoeui.ttf");
-using var stream = File.OpenRead(fontPath);
+    using var stream = File.OpenRead(fontPath);
 
     var fontManager = new FontManagerImpl();
     if (!fontManager.TryCreateGlyphTypeface(stream, FontSimulations.None, out var platformTypeface))
@@ -371,6 +367,191 @@ static string BuildText(int length)
     return new string(chars);
 }
 
+static BenchmarkRun ReadBenchmarkRun(string path)
+{
+    using var stream = File.OpenRead(path);
+    var run = JsonSerializer.Deserialize<BenchmarkRun>(stream);
+    if (run is null)
+        throw new InvalidOperationException($"Failed to read benchmark baseline: {path}");
+
+    return run;
+}
+
+static BenchmarkComparison CompareBenchmarkRuns(
+    BenchmarkRun baseline,
+    BenchmarkRun current,
+    double maxRegressionPercent)
+{
+    if (maxRegressionPercent < 0 || double.IsNaN(maxRegressionPercent))
+        throw new ArgumentOutOfRangeException(nameof(maxRegressionPercent), maxRegressionPercent, "Regression threshold must be non-negative.");
+
+    var baselineByName = baseline.Results.ToDictionary(static x => x.Name, StringComparer.OrdinalIgnoreCase);
+    var results = new List<BenchmarkComparisonResult>(current.Results.Count);
+
+    foreach (var currentResult in current.Results)
+    {
+        if (!baselineByName.TryGetValue(currentResult.Name, out var baselineResult))
+        {
+            results.Add(new BenchmarkComparisonResult(
+                currentResult.Name,
+                currentResult.ThroughputUnit,
+                BaselineThroughput: null,
+                CurrentThroughput: currentResult.Throughput,
+                ThroughputChangePercent: null,
+                BaselineAllocatedBytes: null,
+                CurrentAllocatedBytes: currentResult.AllocatedBytes,
+                AllocatedBytesChangePercent: null,
+                Passed: false,
+                Message: "Missing baseline result."));
+            continue;
+        }
+
+        if (!string.Equals(baselineResult.ThroughputUnit, currentResult.ThroughputUnit, StringComparison.Ordinal))
+        {
+            results.Add(new BenchmarkComparisonResult(
+                currentResult.Name,
+                currentResult.ThroughputUnit,
+                baselineResult.Throughput,
+                currentResult.Throughput,
+                ThroughputChangePercent: null,
+                baselineResult.AllocatedBytes,
+                currentResult.AllocatedBytes,
+                AllocatedBytesChangePercent: null,
+                Passed: false,
+                $"Throughput unit changed from {baselineResult.ThroughputUnit} to {currentResult.ThroughputUnit}."));
+            continue;
+        }
+
+        var throughputChangePercent = PercentChange(baselineResult.Throughput, currentResult.Throughput);
+        var allocationChangePercent = PercentChange(baselineResult.AllocatedBytes, currentResult.AllocatedBytes);
+        var throughputPassed = throughputChangePercent >= -maxRegressionPercent;
+        var allocationPassed = allocationChangePercent <= maxRegressionPercent;
+        var passed = throughputPassed && allocationPassed;
+
+        results.Add(new BenchmarkComparisonResult(
+            currentResult.Name,
+            currentResult.ThroughputUnit,
+            baselineResult.Throughput,
+            currentResult.Throughput,
+            throughputChangePercent,
+            baselineResult.AllocatedBytes,
+            currentResult.AllocatedBytes,
+            allocationChangePercent,
+            passed,
+            passed ? "OK" : "Regression threshold exceeded."));
+    }
+
+    return new BenchmarkComparison(
+        DateTimeOffset.UtcNow,
+        maxRegressionPercent,
+        results.All(static x => x.Passed),
+        results);
+}
+
+static double PercentChange(double baseline, double current)
+{
+    if (baseline == 0)
+        return current == 0 ? 0 : double.PositiveInfinity;
+
+    return ((current - baseline) / baseline) * 100.0;
+}
+
+static void PrintComparison(BenchmarkComparison comparison)
+{
+    Console.WriteLine();
+    Console.WriteLine($"Baseline comparison (max regression {comparison.MaxRegressionPercent:0.##}%): {(comparison.Passed ? "PASS" : "FAIL")}");
+
+    foreach (var result in comparison.Results)
+    {
+        if (result.BaselineThroughput is null || result.ThroughputChangePercent is null)
+        {
+            Console.WriteLine($"  FAIL {result.Name}: {result.Message}");
+            continue;
+        }
+
+        Console.WriteLine(
+            $"  {(result.Passed ? "PASS" : "FAIL")} {result.Name}: " +
+            $"throughput {result.CurrentThroughput:0.###} {result.ThroughputUnit} " +
+            $"({FormatPercent(result.ThroughputChangePercent.Value)}), " +
+            $"alloc {result.CurrentAllocatedBytes} B ({FormatPercent(result.AllocatedBytesChangePercent ?? 0)})");
+    }
+}
+
+static string FormatPercent(double value)
+{
+    if (double.IsPositiveInfinity(value))
+        return "+inf%";
+
+    if (double.IsNegativeInfinity(value))
+        return "-inf%";
+
+    return value.ToString("+0.##;-0.##;0", CultureInfo.InvariantCulture) + "%";
+}
+
+internal sealed record BenchmarkOptions(
+    string? OutputJson,
+    string? BaselineJson,
+    string? ComparisonJson,
+    double MaxRegressionPercent,
+    HashSet<string> CaseFilters,
+    bool ListCases)
+{
+    public static BenchmarkOptions Parse(string[] args)
+    {
+        string? outputJson = null;
+        string? baselineJson = null;
+        string? comparisonJson = null;
+        var maxRegressionPercent = 5.0;
+        var filters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var listCases = false;
+
+        for (var i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            string NextValue()
+            {
+                if (i + 1 >= args.Length)
+                    throw new ArgumentException($"Missing value for {arg}");
+                i++;
+                return args[i];
+            }
+
+            switch (arg)
+            {
+                case "--json":
+                    outputJson = NextValue();
+                    break;
+                case "--baseline":
+                    baselineJson = NextValue();
+                    break;
+                case "--comparison-json":
+                    comparisonJson = NextValue();
+                    break;
+                case "--max-regression-percent":
+                    maxRegressionPercent = double.Parse(NextValue(), CultureInfo.InvariantCulture);
+                    break;
+                case "--case":
+                    foreach (var part in NextValue().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                        filters.Add(part);
+                    break;
+                case "--list-cases":
+                    listCases = true;
+                    break;
+                default:
+                    throw new ArgumentException($"Unknown argument: {arg}");
+            }
+        }
+
+        return new BenchmarkOptions(
+            outputJson,
+            baselineJson,
+            comparisonJson,
+            maxRegressionPercent,
+            filters,
+            listCases);
+    }
+}
+
 internal sealed class BenchmarkApp : Application
 {
 }
@@ -388,3 +569,21 @@ internal sealed record BenchmarkResult(
     double Throughput,
     string ThroughputUnit,
     long AllocatedBytes);
+
+internal sealed record BenchmarkComparison(
+    DateTimeOffset TimestampUtc,
+    double MaxRegressionPercent,
+    bool Passed,
+    IReadOnlyList<BenchmarkComparisonResult> Results);
+
+internal sealed record BenchmarkComparisonResult(
+    string Name,
+    string ThroughputUnit,
+    double? BaselineThroughput,
+    double CurrentThroughput,
+    double? ThroughputChangePercent,
+    long? BaselineAllocatedBytes,
+    long CurrentAllocatedBytes,
+    double? AllocatedBytesChangePercent,
+    bool Passed,
+    string Message);
