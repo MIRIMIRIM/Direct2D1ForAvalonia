@@ -23,6 +23,12 @@ internal enum CaseTier
     Tier2
 }
 
+internal enum InputMemoryKind
+{
+    String,
+    Array
+}
+
 internal sealed record TestCase(
     string Name,
     string Text,
@@ -32,7 +38,10 @@ internal sealed record TestCase(
     string Culture = "en-US",
     IReadOnlyList<AvaloniaFontFeature>? Features = null,
     string MemoryPrefix = "",
-    string MemorySuffix = "");
+    string MemorySuffix = "",
+    double LetterSpacing = 0,
+    double IncrementalTabWidth = 0,
+    InputMemoryKind MemoryKind = InputMemoryKind.String);
 
 internal sealed record GlyphDump(ushort GlyphIndex, int GlyphCluster, double GlyphAdvance, double OffsetX, double OffsetY);
 
@@ -235,13 +244,22 @@ internal static class Program
 
         var culture = new CultureInfo(cultureName);
         var shaperOptions = features.Count == 0
-            ? new TextShaperOptions(glyphTypeface, 32.0, bidiLevel, culture, 0, 0)
-            : new TextShaperOptions(glyphTypeface, 32.0, bidiLevel, culture, 0, 0, features);
+            ? new TextShaperOptions(glyphTypeface, 32.0, bidiLevel, culture, testCase.IncrementalTabWidth, testCase.LetterSpacing)
+            : new TextShaperOptions(glyphTypeface, 32.0, bidiLevel, culture, testCase.IncrementalTabWidth, testCase.LetterSpacing, features);
 
         var shaperDWrite = new DirectWriteTextShaper();
         var textMemory = CreateInputMemory(testCase);
         var dwBuffer = shaperDWrite.ShapeText(textMemory, shaperOptions);
-        var hbBuffer = HarfBuzzShaper.ShapeText(textMemory, hbFont, glyphTypeface, shaperOptions.FontRenderingEmSize, bidiLevel, culture, features);
+        var hbBuffer = HarfBuzzShaper.ShapeText(
+            textMemory,
+            hbFont,
+            glyphTypeface,
+            shaperOptions.FontRenderingEmSize,
+            bidiLevel,
+            culture,
+            features,
+            testCase.LetterSpacing,
+            testCase.IncrementalTabWidth);
 
         var directWriteGlyphs = dwBuffer
             .Select(g => new GlyphDump(g.GlyphIndex, g.GlyphCluster, g.GlyphAdvance, g.GlyphOffset.X, g.GlyphOffset.Y))
@@ -548,6 +566,7 @@ internal static class Program
     {
         return
         [
+            new TestCase("Empty", "", "segoeui.ttf", CaseTier.Tier1),
             new TestCase("Latin (liga on)", "ffi fl ffl", "segoeui.ttf", CaseTier.Tier1),
             new TestCase(
                 "Latin (liga off)",
@@ -567,23 +586,39 @@ internal static class Program
                 "segoeui.ttf",
                 CaseTier.Tier1,
                 Features: [AvaloniaFontFeature.Parse("kern=0")]),
+            new TestCase("Latin letter spacing", "Spacing", "segoeui.ttf", CaseTier.Tier1, LetterSpacing: 1.25),
             new TestCase("Hebrew (RTL)", "שלום עולם", "arial.ttf", CaseTier.Tier1, 1, "he-IL"),
             new TestCase("Combining Marks", "A\u030AA\u030A", "segoeui.ttf", CaseTier.Tier1),
+            new TestCase("Combining Marks array slice", "A\u030AA\u030A", "segoeui.ttf", CaseTier.Tier1, MemoryPrefix: "<<", MemorySuffix: ">>", MemoryKind: InputMemoryKind.Array),
             new TestCase(
                 "Surrogate Pair (Emoji, kern off)",
                 "Hello \uD83D\uDE00 World",
                 "seguiemj.ttf",
                 CaseTier.Tier1,
                 Features: [AvaloniaFontFeature.Parse("kern=0")]),
+            new TestCase(
+                "Surrogate Pair array slice (kern off)",
+                "Hi \uD83D\uDE00",
+                "seguiemj.ttf",
+                CaseTier.Tier1,
+                Features: [AvaloniaFontFeature.Parse("kern=0")],
+                MemoryPrefix: "[",
+                MemorySuffix: "]",
+                MemoryKind: InputMemoryKind.Array),
             new TestCase("Tab Behavior", "A\tB", "segoeui.ttf", CaseTier.Tier1),
+            new TestCase("Tab custom width", "A\tB", "segoeui.ttf", CaseTier.Tier1, IncrementalTabWidth: 48),
+            new TestCase("Only CRLF", "\r\n", "segoeui.ttf", CaseTier.Tier1),
+            new TestCase("Only LF", "\n", "segoeui.ttf", CaseTier.Tier1),
             new TestCase("Line Break LF", "AB\n", "segoeui.ttf", CaseTier.Tier1),
             new TestCase("Line Break CRLF", "AB\r\n", "segoeui.ttf", CaseTier.Tier1),
             new TestCase("Line Break CR", "AB\r", "segoeui.ttf", CaseTier.Tier1),
             new TestCase("Line Break CRLF slice", "AB\r\n", "segoeui.ttf", CaseTier.Tier1, MemoryPrefix: "xx", MemorySuffix: "yy"),
             new TestCase("Line Break LF slice", "AB\n", "segoeui.ttf", CaseTier.Tier1, MemoryPrefix: "xx", MemorySuffix: "yy"),
             new TestCase("Line Break CR slice", "AB\r", "segoeui.ttf", CaseTier.Tier1, MemoryPrefix: "xx", MemorySuffix: "yy"),
+            new TestCase("Line Break CRLF array slice", "AB\r\n", "segoeui.ttf", CaseTier.Tier1, MemoryPrefix: "xx", MemorySuffix: "yy", MemoryKind: InputMemoryKind.Array),
             new TestCase("Mid Break CRLF", "Line1\r\nLine2", "segoeui.ttf", CaseTier.Tier2),
             new TestCase("Mid Break CRLF slice", "Line1\r\nLine2", "segoeui.ttf", CaseTier.Tier2, MemoryPrefix: "[[", MemorySuffix: "]]"),
+            new TestCase("Mid Break CRLF array slice", "Line1\r\nLine2", "segoeui.ttf", CaseTier.Tier2, MemoryPrefix: "[[", MemorySuffix: "]]", MemoryKind: InputMemoryKind.Array),
             new TestCase("Leading CRLF", "\r\nLine", "segoeui.ttf", CaseTier.Tier2),
             new TestCase("Consecutive CRLF", "A\r\n\r\nB", "segoeui.ttf", CaseTier.Tier2),
             new TestCase("Tab Before CRLF", "A\t\r\n", "segoeui.ttf", CaseTier.Tier2),
@@ -597,6 +632,10 @@ internal static class Program
                 Features: [AvaloniaFontFeature.Parse("kern=0")],
                 MemoryPrefix: "<",
                 MemorySuffix: ">"),
+            new TestCase("Mixed LTR RTL digits", "abc שלום 123", "arial.ttf", CaseTier.Tier2),
+            new TestCase("Arabic", "مرحبا بالعالم", "arial.ttf", CaseTier.Tier2, 1, "ar-SA"),
+            new TestCase("Zero Width Joiner", "A\u200DB", "segoeui.ttf", CaseTier.Tier2),
+            new TestCase("Non-breaking spaces", "A\u00A0B\u2007C\u202FD", "segoeui.ttf", CaseTier.Tier2),
             new TestCase("CJK Chinese", "你好世界", "msyh.ttc", CaseTier.Tier1, Culture: "zh-CN"),
             new TestCase("CJK Japanese", "こんにちは世界", "msgothic.ttc", CaseTier.Tier1, Culture: "ja-JP"),
             new TestCase("CJK Korean", "안녕하세요 세계", "malgun.ttf", CaseTier.Tier1, Culture: "ko-KR"),
@@ -607,13 +646,20 @@ internal static class Program
 
     private static ReadOnlyMemory<char> CreateInputMemory(TestCase testCase)
     {
-        if (testCase.MemoryPrefix.Length == 0 && testCase.MemorySuffix.Length == 0)
+        if (testCase.MemoryKind == InputMemoryKind.String &&
+            testCase.MemoryPrefix.Length == 0 &&
+            testCase.MemorySuffix.Length == 0)
         {
             return testCase.Text.AsMemory();
         }
 
         var containingText = string.Concat(testCase.MemoryPrefix, testCase.Text, testCase.MemorySuffix);
-        return containingText.AsMemory(testCase.MemoryPrefix.Length, testCase.Text.Length);
+        return testCase.MemoryKind switch
+        {
+            InputMemoryKind.String => containingText.AsMemory(testCase.MemoryPrefix.Length, testCase.Text.Length),
+            InputMemoryKind.Array => containingText.ToCharArray().AsMemory(testCase.MemoryPrefix.Length, testCase.Text.Length),
+            _ => throw new ArgumentOutOfRangeException(nameof(testCase), testCase.MemoryKind, "Unsupported input memory kind.")
+        };
     }
 
     private static List<TestCase> FilterCases(IEnumerable<TestCase> cases, string? caseName)
