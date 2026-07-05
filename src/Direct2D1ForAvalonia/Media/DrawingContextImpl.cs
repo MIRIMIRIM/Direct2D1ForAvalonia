@@ -14,6 +14,7 @@ using Vortice.DXGI;
 using SharpGen.Runtime;
 using Vortice;
 using Vortice.DCommon;
+using AVector = Avalonia.Vector;
 
 namespace MIR.Direct2D1ForAvalonia.Media
 {
@@ -299,8 +300,12 @@ namespace MIR.Direct2D1ForAvalonia.Media
                             * previousTransform;
                         _deviceContext.Transform = drawTransform;
 
+                        using var opacityEffect = CreateOpacityEffect(d2d.Value, (float)opacity);
+                        using var opacityOutput = opacityEffect?.Output;
+                        var image = opacityOutput ?? d2d.Value;
+
                         _deviceContext.DrawImage(
-                            d2d.Value,
+                            image,
                             null,
                             sourceRect.ToVortice(),
                             interpolationMode,
@@ -462,6 +467,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             var radiusY = Math.Max(rrect.RadiiTopLeft.Y,
                 Math.Max(rrect.RadiiTopRight.Y, Math.Max(rrect.RadiiBottomRight.Y, rrect.RadiiBottomLeft.Y)));
             var isRounded = !IsZero(radiusX) || !IsZero(radiusY);
+            using var roundedGeometry = isRounded ? CreateRoundedRectGeometry(rrect) : null;
 
             if (brush != null)
             {
@@ -471,18 +477,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     {
                         if (isRounded)
                         {
-                            _deviceContext.FillRoundedRectangle(
-                                new RoundedRectangle
-                                {
-                                    Rect = new RawRectF(
-                                        (float)rect.X,
-                                        (float)rect.Y,
-                                        (float)rect.Right,
-                                        (float)rect.Bottom),
-                                    RadiusX = (float)radiusX,
-                                    RadiusY = (float)radiusY
-                                },
-                                b.PlatformBrush);
+                            _deviceContext.FillGeometry(roundedGeometry!, b.PlatformBrush);
                         }
                         else
                         {
@@ -501,8 +496,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     {
                         if (isRounded)
                         {
-                            _deviceContext.DrawRoundedRectangle(
-                                new RoundedRectangle { Rect = rc, RadiusX = (float)radiusX, RadiusY = (float)radiusY },
+                            _deviceContext.DrawGeometry(
+                                roundedGeometry!,
                                 wrapper.PlatformBrush,
                                 (float)pen.Thickness,
                                 d2dStroke);
@@ -644,13 +639,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             // Direct2D has no native rounded-rect clip; push a layer whose geometric mask is
             // a rounded-rectangle geometry so the clip honors the corner radii. The geometry
             // must stay alive until PopClip, so it is tracked in the clip-kind stack.
-            var geometry = Direct2D1Platform.Direct2D1Factory.CreateRoundedRectangleGeometry(
-                new RoundedRectangle
-                {
-                    Rect = clip.Rect.ToDirect2D(),
-                    RadiusX = (float)radiusX,
-                    RadiusY = (float)radiusY
-                });
+            var geometry = CreateRoundedRectGeometry(clip);
 
             var parameters = new LayerParameters
             {
@@ -672,6 +661,120 @@ namespace MIR.Direct2D1ForAvalonia.Media
             }
 
             _clipKindStack.Push(geometry);
+        }
+
+        private ID2D1Effect? CreateOpacityEffect(ID2D1Image source, float opacity)
+        {
+            if (opacity >= 1)
+                return null;
+
+            var effect = new ID2D1Effect(_deviceContext.CreateEffect(EffectGuids.Opacity));
+            effect.SetInput(0, source, true);
+            effect.SetValue((uint)OpacityProperties.Opacity, opacity);
+            return effect;
+        }
+
+        private static ID2D1PathGeometry CreateRoundedRectGeometry(RoundedRect roundedRect)
+        {
+            var geometry = Direct2D1Platform.Direct2D1Factory.CreatePathGeometry();
+            try
+            {
+                using (var sink = geometry.Open())
+                {
+                    AddRoundedRectFigure(sink, roundedRect);
+                    sink.Close();
+                }
+
+                return geometry;
+            }
+            catch
+            {
+                geometry.Dispose();
+                throw;
+            }
+        }
+
+        private static void AddRoundedRectFigure(ID2D1GeometrySink sink, RoundedRect roundedRect)
+        {
+            var rect = roundedRect.Rect;
+            var left = (float)rect.Left;
+            var top = (float)rect.Top;
+            var right = (float)rect.Right;
+            var bottom = (float)rect.Bottom;
+
+            var topLeft = roundedRect.RadiiTopLeft;
+            var topRight = roundedRect.RadiiTopRight;
+            var bottomRight = roundedRect.RadiiBottomRight;
+            var bottomLeft = roundedRect.RadiiBottomLeft;
+            NormalizeRadii(rect.Width, rect.Height, ref topLeft, ref topRight, ref bottomRight, ref bottomLeft);
+
+            sink.BeginFigure(new Vector2(left + (float)topLeft.X, top), FigureBegin.Filled);
+
+            sink.AddLine(new Vector2(right - (float)topRight.X, top));
+            AddCornerArc(sink, topRight, new Vector2(right, top + (float)topRight.Y));
+
+            sink.AddLine(new Vector2(right, bottom - (float)bottomRight.Y));
+            AddCornerArc(sink, bottomRight, new Vector2(right - (float)bottomRight.X, bottom));
+
+            sink.AddLine(new Vector2(left + (float)bottomLeft.X, bottom));
+            AddCornerArc(sink, bottomLeft, new Vector2(left, bottom - (float)bottomLeft.Y));
+
+            sink.AddLine(new Vector2(left, top + (float)topLeft.Y));
+            AddCornerArc(sink, topLeft, new Vector2(left + (float)topLeft.X, top));
+
+            sink.EndFigure(FigureEnd.Closed);
+        }
+
+        private static void NormalizeRadii(
+            double width,
+            double height,
+            ref AVector topLeft,
+            ref AVector topRight,
+            ref AVector bottomRight,
+            ref AVector bottomLeft)
+        {
+            topLeft = ClampRadius(topLeft);
+            topRight = ClampRadius(topRight);
+            bottomRight = ClampRadius(bottomRight);
+            bottomLeft = ClampRadius(bottomLeft);
+
+            var scale = 1.0;
+            scale = Math.Min(scale, GetRadiusScale(width, topLeft.X + topRight.X));
+            scale = Math.Min(scale, GetRadiusScale(width, bottomLeft.X + bottomRight.X));
+            scale = Math.Min(scale, GetRadiusScale(height, topLeft.Y + bottomLeft.Y));
+            scale = Math.Min(scale, GetRadiusScale(height, topRight.Y + bottomRight.Y));
+
+            if (scale < 1.0)
+            {
+                topLeft *= scale;
+                topRight *= scale;
+                bottomRight *= scale;
+                bottomLeft *= scale;
+            }
+        }
+
+        private static AVector ClampRadius(AVector radius)
+            => new(Math.Max(radius.X, 0), Math.Max(radius.Y, 0));
+
+        private static double GetRadiusScale(double available, double required)
+            => available <= 0 ? 0 : required > available && required > 0 ? available / required : 1.0;
+
+        private static void AddCornerArc(ID2D1GeometrySink sink, AVector radius, Vector2 endPoint)
+        {
+            if (radius.X <= 0 || radius.Y <= 0)
+            {
+                sink.AddLine(endPoint);
+                return;
+            }
+
+            sink.AddArc(new Vortice.Direct2D1.ArcSegment
+            {
+                Point = endPoint,
+                Size = new Vortice.Mathematics.Size((float)radius.X, (float)radius.Y),
+                RotationAngle = 0,
+                SweepDirection = Vortice.Direct2D1.SweepDirection.Clockwise,
+                ArcSize = ArcSize.Small
+            });
         }
 
         public void PushClip(IPlatformRenderInterfaceRegion region)

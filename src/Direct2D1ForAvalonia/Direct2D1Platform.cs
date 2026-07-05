@@ -358,7 +358,7 @@ namespace MIR.Direct2D1ForAvalonia
             return new WicBitmapImpl(format, alphaFormat, data, size, dpi, stride);
         }
 
-        public bool SupportsIndividualRoundRects => false;
+        public bool SupportsIndividualRoundRects => true;
 
         public AlphaFormat DefaultAlphaFormat => AlphaFormat.Premul;
 
