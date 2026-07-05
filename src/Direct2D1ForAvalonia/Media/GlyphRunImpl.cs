@@ -128,7 +128,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
             }
 
             var b = pathGeometry.GetBounds();
-            var midY = (lowerBound + upperBound) * 0.5f + (float)BaselineOrigin.Y;
+            // GetGlyphRunOutline emits the outline in glyph space (baseline at y=0), and the
+            // band bounds are already relative to that space (see TextDecoration), so sample
+            // the band midpoint directly without adding BaselineOrigin.
+            var midY = (lowerBound + upperBound) * 0.5f;
             var left = b.Left;
             var right = b.Right;
             var bandWidth = right - left;
@@ -148,7 +151,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 var filled = pathGeometry.FillContainsPoint(new System.Numerics.Vector2(x, midY));
                 if (filled != inside)
                 {
-                    intersections.Add(x - (float)BaselineOrigin.X);
+                    intersections.Add(x);
                     inside = filled;
                 }
             }
@@ -156,7 +159,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (inside)
             {
                 // Close an open trailing span so callers always see paired boundaries.
-                intersections.Add(right - (float)BaselineOrigin.X);
+                intersections.Add(right);
             }
 
             return intersections;
