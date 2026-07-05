@@ -4,7 +4,7 @@ using SharpGen.Runtime;
 using Vortice;
 using Vortice.DirectWrite;
 
-namespace MIR.DirectWriteForAvalonia
+namespace MIR.DirectWriteFontsForAvalonia
 {
     /// <summary>
     /// Resource FontFileEnumerator.

@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using MIR.DirectWriteForAvalonia;
+using MIR.DirectWriteFontsForAvalonia;
 using Avalonia.Media;
 using Avalonia.Media.TextFormatting;
 using Avalonia.Platform;

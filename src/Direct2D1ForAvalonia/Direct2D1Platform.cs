@@ -4,7 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.Versioning;
 using Avalonia;
-using MIR.DirectWriteForAvalonia;
+using MIR.DirectWriteFontsForAvalonia;
 using MIR.Direct2D1ForAvalonia.Media;
 using MIR.Direct2D1ForAvalonia.Media.Imaging;
 using Avalonia.Media;

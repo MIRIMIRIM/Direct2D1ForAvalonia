@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="Direct2D1ForAvalonia/MIR.Direct2D1ForAvalonia.csproj" />
+  <Project Path="DirectWriteFontsForAvalonia/MIR.DirectWriteFontsForAvalonia.csproj" />
   <Project Path="DirectWriteForAvalonia/MIR.DirectWriteForAvalonia.csproj" />
   <Folder Name="/samples/">
     <Project Path="AotSmoke/AotSmoke.csproj" />

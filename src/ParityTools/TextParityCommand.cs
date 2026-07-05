@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using Avalonia;
 using MIR.Direct2D1ForAvalonia;
+using MIR.DirectWriteFontsForAvalonia;
 using MIR.Direct2D1ForAvalonia.Media;
 using MIR.DirectWriteForAvalonia;
 using Avalonia.Media;
@@ -77,7 +78,7 @@ internal static class TextParityCommand
     {
         output.WriteLine("Initializing MIR.Direct2D1ForAvalonia Platform...");
         Direct2D1Platform.InitializeDirect2D();
-        MIR.DirectWriteForAvalonia.DirectWritePlatform.InitializeDirectWrite();
+        DirectWritePlatform.InitializeDirectWrite();
 
         var toolRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", ".."));
         var outDir = options.OutDir ?? Path.Combine(toolRoot, "out");

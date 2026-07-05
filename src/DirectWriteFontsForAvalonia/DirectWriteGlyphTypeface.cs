@@ -5,7 +5,7 @@ using Avalonia.Media;
 using Avalonia.Media.Fonts;
 using DWrite = Vortice.DirectWrite;
 
-namespace MIR.DirectWriteForAvalonia
+namespace MIR.DirectWriteFontsForAvalonia
 {
     internal sealed class DirectWriteGlyphTypeface : IPlatformTypeface
     {

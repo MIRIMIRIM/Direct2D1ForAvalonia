@@ -14,7 +14,7 @@ using FontStretch = Avalonia.Media.FontStretch;
 using FontStyle = Avalonia.Media.FontStyle;
 using FontWeight = Avalonia.Media.FontWeight;
 
-namespace MIR.DirectWriteForAvalonia
+namespace MIR.DirectWriteFontsForAvalonia
 {
     [SupportedOSPlatform("windows")]
     internal class FontManagerImpl : IFontManagerImpl

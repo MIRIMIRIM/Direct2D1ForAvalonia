@@ -7,7 +7,7 @@
     <Title>MIR.Direct2D1ForAvalonia</Title>
     <Version>12.0.0.3</Version>
     <Description>Direct2D1 rendering backend for Avalonia 12 on Windows, maintained as an independent derivative.</Description>
-    <PackageTags>Avalonia;Direct2D1;Win32;Rendering;Graphics</PackageTags>
+    <PackageTags>Avalonia;Direct2D1;DirectWrite;Win32;Rendering;Graphics;Fonts</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,6 +20,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\DirectWriteFontsForAvalonia\MIR.DirectWriteFontsForAvalonia.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Keep compiling against Avalonia runtime (lib/) assemblies until ref-only blockers are resolved. -->
     <PackageReference Include="Avalonia" Version="12.0.0" ExcludeAssets="compile" />
     <PackageReference Include="Avalonia.Win32" Version="12.0.0" ExcludeAssets="compile" />
@@ -28,10 +32,6 @@
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
     <PackageReference Include="Vortice.DirectX" Version="3.8.3" />
     <PackageReference Include="Vortice.Mathematics" Version="2.1.1" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\DirectWriteForAvalonia\MIR.DirectWriteForAvalonia.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -3,7 +3,7 @@ using Avalonia.Platform;
 using SharpGen.Runtime;
 using Vortice.DirectWrite;
 
-namespace MIR.DirectWriteForAvalonia
+namespace MIR.DirectWriteFontsForAvalonia
 {
     internal static class DirectWritePlatform
     {
@@ -32,22 +32,12 @@ namespace MIR.DirectWriteForAvalonia
         internal static void InitializeFontManager()
         {
             if (!OperatingSystem.IsWindows())
-                throw new PlatformNotSupportedException("MIR.DirectWriteForAvalonia font manager is only supported on Windows.");
+                throw new PlatformNotSupportedException("MIR.Direct2D1ForAvalonia DirectWrite font manager is only supported on Windows.");
 
             InitializeDirectWrite();
             AvaloniaLocator.CurrentMutable.Bind<IFontManagerImpl>().ToConstant(new FontManagerImpl());
         }
 
-        internal static void Initialize()
-        {
-            if (!OperatingSystem.IsWindows())
-                throw new PlatformNotSupportedException("MIR.DirectWriteForAvalonia text shaping is only supported on Windows.");
-
-            InitializeDirectWrite();
-            AvaloniaLocator.CurrentMutable
-                .Bind<IFontManagerImpl>().ToConstant(new FontManagerImpl())
-                .Bind<ITextShaperImpl>().ToConstant(new DirectWriteTextShaper());
-        }
     }
 
     internal static class SharpGenRuntimeInitializer

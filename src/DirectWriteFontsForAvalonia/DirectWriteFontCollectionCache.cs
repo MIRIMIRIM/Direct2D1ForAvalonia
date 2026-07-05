@@ -13,7 +13,7 @@ using System.Linq;
 using System;
 using System.Runtime.Versioning;
 
-namespace MIR.DirectWriteForAvalonia
+namespace MIR.DirectWriteFontsForAvalonia
 {
     [SupportedOSPlatform("windows")]
     internal static class DirectWriteFontCollectionCache

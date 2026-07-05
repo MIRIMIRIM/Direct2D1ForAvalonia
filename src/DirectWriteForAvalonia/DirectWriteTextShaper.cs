@@ -10,6 +10,7 @@ using Avalonia.Media.Fonts;
 using Avalonia.Media.TextFormatting;
 using Avalonia.Media.TextFormatting.Unicode;
 using Avalonia.Platform;
+using MIR.DirectWriteFontsForAvalonia;
 using SharpGen.Runtime;
 using Vortice.DirectWrite;
 using AvaloniaFontFeature = Avalonia.Media.FontFeature;

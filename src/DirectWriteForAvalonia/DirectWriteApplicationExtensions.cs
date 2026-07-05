@@ -11,7 +11,7 @@ namespace MIR.DirectWriteForAvalonia
             if (!OperatingSystem.IsWindows())
                 throw new PlatformNotSupportedException("MIR.DirectWriteForAvalonia text shaping is only supported on Windows.");
 
-            return builder.UseTextShapingSubsystem(DirectWritePlatform.Initialize, "DirectWrite");
+            return builder.UseTextShapingSubsystem(DirectWriteTextShapingPlatform.Initialize, "DirectWrite");
         }
     }
 }

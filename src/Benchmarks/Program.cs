@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using Avalonia;
 using MIR.Direct2D1ForAvalonia;
+using MIR.DirectWriteFontsForAvalonia;
 using MIR.DirectWriteForAvalonia;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;

@@ -6,7 +6,7 @@ using Avalonia.Media.Fonts;
 using Avalonia.Platform;
 using Avalonia.Utilities;
 
-namespace MIR.DirectWriteForAvalonia
+namespace MIR.DirectWriteFontsForAvalonia
 {
     internal static class FontFamilyLoader
     {
