@@ -12,6 +12,7 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Media.TextFormatting;
 using Avalonia.Platform;
+using Avalonia.Win32;
 
 if (!OperatingSystem.IsWindows())
     throw new PlatformNotSupportedException("Benchmarks target Windows only.");
@@ -69,7 +70,7 @@ var needsAvaloniaInit = selectedCases.Any(static x =>
 if (needsAvaloniaInit)
 {
     AppBuilder.Configure<BenchmarkApp>()
-        .UsePlatformDetect()
+        .UseWin32()
         .UseDirect2D1()
         .UseDirectWrite()
         .SetupWithoutStarting();
