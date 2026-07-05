@@ -52,3 +52,9 @@ Packaging:
 - Pack with `dotnet pack src/Direct2D1ForAvalonia/MIR.Direct2D1ForAvalonia.csproj -c Release`
 - Pack with `dotnet pack src/DirectWriteForAvalonia/MIR.DirectWriteForAvalonia.csproj -c Release`
 - Both packages embed `README.md`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`.
+
+Validation:
+
+- Fast local check: `pwsh scripts/validate.ps1`
+- Include real window screenshot smoke: `pwsh scripts/validate.ps1 -RunWindowSmoke`
+- Include benchmark smoke: `pwsh scripts/validate.ps1 -RunBenchmarks`
