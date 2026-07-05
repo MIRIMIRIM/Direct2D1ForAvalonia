@@ -49,9 +49,25 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
 
         public bool IsCorrupted => false;
 
-        public void Blit(IDrawingContextImpl context) => throw new NotSupportedException();
+        public void Blit(IDrawingContextImpl context)
+        {
+            if (context is not DrawingContextImpl d2dContext)
+                throw new InvalidOperationException("Blit requires a Direct2D drawing context.");
 
-        public bool CanBlit => false;
+            var rect = new Rect(PixelSize.ToSizeWithDpi(Dpi));
+
+            d2dContext.PushBitmapBlendMode(Avalonia.Media.Imaging.BitmapBlendingMode.Source);
+            try
+            {
+                d2dContext.DrawBitmap(this, 1, rect, rect);
+            }
+            finally
+            {
+                d2dContext.PopBitmapBlendMode();
+            }
+        }
+
+        public bool CanBlit => true;
 
         public IDrawingContextLayerImpl CreateLayer(Size size)
         {

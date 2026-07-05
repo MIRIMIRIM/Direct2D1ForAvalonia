@@ -268,6 +268,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="destRect">The rect in the output to draw to.</param>
         public void DrawBitmap(IBitmapImpl source, double opacity, Rect sourceRect, Rect destRect)
         {
+            if (EffectiveBitmapBlendingMode == BitmapBlendingMode.Destination)
+                return;
+
             using (var d2d = ((BitmapImpl)source).GetDirect2DBitmap(_deviceContext))
             {
                 var interpolationMode = GetInterpolationMode(RenderOptions.BitmapInterpolationMode);
@@ -341,6 +344,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
         {
             switch (blendingMode)
             {
+                case BitmapBlendingMode.Source:
+                    return CompositeMode.SourceCopy;
                 case BitmapBlendingMode.SourceIn:
                     return CompositeMode.SourceIn;
                 case BitmapBlendingMode.SourceOut:
