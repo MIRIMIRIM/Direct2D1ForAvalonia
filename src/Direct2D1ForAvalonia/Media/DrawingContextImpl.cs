@@ -523,7 +523,41 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void DrawRegion(IBrush? brush, IPen? pen, IPlatformRenderInterfaceRegion region)
         {
-            throw new NotSupportedException();
+            if (region.IsEmpty)
+                return;
+
+            if (region is not Direct2DRegionImpl d2dRegion)
+                throw new InvalidOperationException("Region was not created by this Direct2D backend.");
+
+            using var geometry = d2dRegion.CreateGeometry();
+            var bounds = Direct2DRegionImpl.ToRect(d2dRegion.Bounds);
+
+            if (brush != null)
+            {
+                using (var d2dBrush = CreateBrush(brush, bounds))
+                {
+                    if (d2dBrush.PlatformBrush != null)
+                    {
+                        _deviceContext.FillGeometry(geometry, d2dBrush.PlatformBrush);
+                    }
+                }
+            }
+
+            if (pen?.Brush != null)
+            {
+                using (var d2dBrush = CreateBrush(pen.Brush, bounds.Inflate(pen.Thickness / 2)))
+                using (var d2dStroke = pen.ToDirect2DStrokeStyle(_deviceContext))
+                {
+                    if (d2dBrush.PlatformBrush != null)
+                    {
+                        _deviceContext.DrawGeometry(
+                            geometry,
+                            d2dBrush.PlatformBrush,
+                            (float)pen.Thickness,
+                            d2dStroke);
+                    }
+                }
+            }
         }
 
         /// <inheritdoc />
@@ -1044,7 +1078,37 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void PushClip(IPlatformRenderInterfaceRegion region)
         {
-            throw new NotSupportedException();
+            if (region is not Direct2DRegionImpl d2dRegion)
+                throw new InvalidOperationException("Region was not created by this Direct2D backend.");
+
+            if (region.IsEmpty)
+            {
+                _clipKindStack.Push(null);
+                _deviceContext.PushAxisAlignedClip(default, AntialiasMode.PerPrimitive);
+                return;
+            }
+
+            var geometry = d2dRegion.CreateGeometry();
+            var parameters = new LayerParameters
+            {
+                ContentBounds = Direct2DRegionImpl.ToRect(region.Bounds).ToDirect2D(),
+                MaskTransform = Matrix3x2.Identity,
+                Opacity = 1,
+                GeometricMask = geometry,
+                MaskAntialiasMode = AntialiasMode.Aliased
+            };
+
+            try
+            {
+                PushDirect2DLayer(parameters);
+            }
+            catch
+            {
+                geometry.Dispose();
+                throw;
+            }
+
+            _clipKindStack.Push(geometry);
         }
 
         public void PopClip()

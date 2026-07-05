@@ -367,8 +367,8 @@ namespace MIR.Direct2D1ForAvalonia
             format == PixelFormats.Bgra8888 
             || format == PixelFormats.Rgba8888;
 
-        public bool SupportsRegions => false;
-        public IPlatformRenderInterfaceRegion CreateRegion() => throw new NotSupportedException();
+        public bool SupportsRegions => true;
+        public IPlatformRenderInterfaceRegion CreateRegion() => new Direct2DRegionImpl();
 
         private sealed class Direct2DGraphicsContext : IPlatformGraphicsContext
         {
