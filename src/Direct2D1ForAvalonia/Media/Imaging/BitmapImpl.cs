@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using Avalonia.Platform;
+using SharpGen.Runtime.Win32;
 using Vortice.Direct2D1;
 using Vortice.WIC;
 
@@ -31,6 +32,18 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// The optional <paramref name="quality"/> is honored where the format and binding support it.
         /// </summary>
         protected internal abstract void Save(Stream stream, ContainerFormat containerFormat, int? quality);
+
+        protected static void ConfigureEncoderOptions(
+            IPropertyBag2 encoderOptions,
+            ContainerFormat containerFormat,
+            int? quality)
+        {
+            if (containerFormat != ContainerFormat.Jpeg || quality is null)
+                return;
+
+            var normalizedQuality = Math.Clamp(quality.Value, 0, 100) / 100.0f;
+            encoderOptions.Set("ImageQuality", normalizedQuality);
+        }
 
         /// <summary>
         /// Maps a file extension to a WIC container format, defaulting to PNG.

@@ -36,7 +36,7 @@ AppBuilder.Configure<App>()
 
 - **Windows only.** Direct2D1/DirectWrite are not available on other platforms.
 - **Window surfaces.** `UseDirect2D1()` renders via `IDirect3D11TexturePlatformSurface` (the composition path Avalonia lights up through WinUI Composition / DirectComposition) or an external Direct2D render target (`IExternalDirect2DRenderTargetSurface`). Bare-HWND swap chains and the software framebuffer fallback are not supported and will throw `NotSupportedException` at render-target creation.
-- **Bitmap quality.** `Bitmap.Save` accepts `.png`, `.jpg/.jpeg`, `.bmp`, `.tif/.tiff`, `.gif`, and `.webp` via the file extension. The optional `quality` parameter is accepted but not yet applied (Vortice does not expose `IPropertyBag2.Write`), so JPEG output uses the encoder default quality.
+- **Bitmap formats.** `Bitmap.Save` accepts `.png`, `.jpg/.jpeg`, `.bmp`, `.tif/.tiff`, `.gif`, and `.webp` via the file extension. The optional `quality` parameter is applied to JPEG output through WIC's `ImageQuality` encoder option.
 - **Path segmenting.** `Geometry.TryGetSegment` is supported through a Direct2D length-sampled polyline approximation. It preserves path trimming behavior, but returned curve segments are flattened rather than retaining their original Bezier/arc commands.
 - **3D transforms.** Only the 2D `Transform` (Matrix) is honored. There is no per-context 4x4/perspective transform.
 - **Thread affinity.** The Direct2D device context is thread-affine. The standard single-render-thread Avalonia model is fine; the `EnsureCurrent()` hook does not currently marshal or assert thread ownership.

@@ -268,10 +268,18 @@ namespace MIR.Direct2D1ForAvalonia.Media
             using (var encoder = Direct2D1Platform.ImagingFactory.CreateEncoder(containerFormat, stream))
             using (var frame = encoder.CreateNewFrame(out var props))
             {
-                frame.Initialize(props);
-                frame.WriteSource(WicImpl);
-                frame.Commit();
-                encoder.Commit();
+                try
+                {
+                    ConfigureEncoderOptions(props, containerFormat, quality);
+                    frame.Initialize(props);
+                    frame.WriteSource(WicImpl);
+                    frame.Commit();
+                    encoder.Commit();
+                }
+                finally
+                {
+                    props.Dispose();
+                }
             }
         }
 

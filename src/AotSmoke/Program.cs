@@ -105,7 +105,26 @@ internal static class OffscreenSmoke
         bitmap.Save(outputPath);
         ScreenshotVerifier.VerifyPng(outputPath, "offscreen");
         ScreenshotVerifier.VerifyImageBrushMarker(outputPath, "offscreen image brush", 196, 16, 48, 32);
+        VerifyJpegQuality(bitmap, options.OutputDirectory);
         Console.WriteLine($"Offscreen smoke passed. screenshot={outputPath}");
+    }
+
+    private static void VerifyJpegQuality(RenderTargetBitmap bitmap, string outputDirectory)
+    {
+        var lowQualityPath = Path.Combine(outputDirectory, "offscreen-q15.jpg");
+        var highQualityPath = Path.Combine(outputDirectory, "offscreen-q95.jpg");
+
+        bitmap.Save(lowQualityPath, quality: 15);
+        bitmap.Save(highQualityPath, quality: 95);
+
+        var lowQualityLength = new FileInfo(lowQualityPath).Length;
+        var highQualityLength = new FileInfo(highQualityPath).Length;
+
+        if (highQualityLength <= lowQualityLength)
+        {
+            throw new InvalidOperationException(
+                $"JPEG quality smoke expected q95 to be larger than q15, but q15={lowQualityLength} and q95={highQualityLength}.");
+        }
     }
 }
 

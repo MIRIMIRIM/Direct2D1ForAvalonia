@@ -49,10 +49,18 @@ namespace MIR.Direct2D1ForAvalonia.Media
             using (var frame = encoder.CreateNewFrame(out var props))
             using (var bitmapSource = _direct2DBitmap.QueryInterface<IWICBitmapSource>())
             {
-                frame.Initialize(props);
-                frame.WriteSource(bitmapSource);
-                frame.Commit();
-                encoder.Commit();
+                try
+                {
+                    ConfigureEncoderOptions(props, containerFormat, quality);
+                    frame.Initialize(props);
+                    frame.WriteSource(bitmapSource);
+                    frame.Commit();
+                    encoder.Commit();
+                }
+                finally
+                {
+                    props.Dispose();
+                }
             }
         }
     }
