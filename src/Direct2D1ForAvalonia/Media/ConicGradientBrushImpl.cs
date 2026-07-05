@@ -1,6 +1,5 @@
 using System;
 using System.Linq;
-using System.Numerics;
 using System.Runtime.InteropServices;
 using Avalonia.Media;
 using Vortice.Direct2D1;
@@ -50,12 +49,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
                 var bitmapDipWidth = pixelWidth * 96.0 / dpi.Width;
                 var bitmapDipHeight = pixelHeight * 96.0 / dpi.Height;
-                var transform = Matrix3x2.CreateScale(
-                        (float)(destinationRect.Width / bitmapDipWidth),
-                        (float)(destinationRect.Height / bitmapDipHeight))
-                    * Matrix3x2.CreateTranslation(
-                        (float)destinationRect.X,
-                        (float)destinationRect.Y);
+                var transform = Matrix.CreateScale(
+                        destinationRect.Width / bitmapDipWidth,
+                        destinationRect.Height / bitmapDipHeight)
+                    * Matrix.CreateTranslation(destinationRect.X, destinationRect.Y);
 
                 PlatformBrush = target.CreateBitmapBrush(
                     _bitmap,
@@ -68,7 +65,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     new BrushProperties
                     {
                         Opacity = 1,
-                        Transform = transform
+                        Transform = BrushTransform.Apply(brush, destinationRect, transform).ToDirect2D()
                     });
             }
             finally

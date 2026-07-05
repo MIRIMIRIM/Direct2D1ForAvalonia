@@ -26,7 +26,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 PlatformBrush = target.CreateBitmapBrush(
                     _bitmap.Value,
                     GetBitmapBrushProperties(brush),
-                    GetBrushProperties(brush, calc.DestinationRect, brushOffset));
+                    GetBrushProperties(brush, calc.DestinationRect, destinationRect, brushOffset));
             }
             else
             {
@@ -35,7 +35,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     PlatformBrush = target.CreateBitmapBrush(
                         intermediate.Bitmap,
                         GetBitmapBrushProperties(brush),
-                        GetBrushProperties(brush, calc.DestinationRect, brushOffset));
+                        GetBrushProperties(brush, calc.DestinationRect, destinationRect, brushOffset));
                 }
             }
         }
@@ -57,23 +57,21 @@ namespace MIR.Direct2D1ForAvalonia.Media
             };
         }
 
-        private static BrushProperties GetBrushProperties(ITileBrush brush, Rect destinationRect, Vector offset)
+        private static BrushProperties GetBrushProperties(
+            ITileBrush brush,
+            Rect tileRect,
+            Rect targetBox,
+            Vector offset)
         {
             var tileTransform =
                 brush.TileMode != TileMode.None ?
-                Matrix.CreateTranslation(destinationRect.X, destinationRect.Y) :
+                Matrix.CreateTranslation(tileRect.X, tileRect.Y) :
                 Matrix.Identity;
 
             if (offset != default)
                 tileTransform = Matrix.CreateTranslation(offset);
 
-            if (brush.Transform != null && brush.TileMode != TileMode.None)
-            {
-                var transformOrigin = brush.TransformOrigin.ToPixels(destinationRect);
-                var originOffset = Matrix.CreateTranslation(transformOrigin);
-
-                tileTransform = -originOffset * brush.Transform.Value * originOffset * tileTransform;
-            }
+            tileTransform = BrushTransform.Apply(brush, targetBox, tileTransform);
 
             return new BrushProperties
             {

@@ -98,6 +98,7 @@ internal static class OffscreenSmoke
 
             context.DrawText(text, new Point(8, 8));
             context.DrawRectangle(SmokeAssets.ImageBrush, null, new Rect(196, 16, 48, 32));
+            context.DrawRectangle(SmokeAssets.TransformedImageBrush, null, new Rect(16, 108, 64, 16));
         }
 
         Directory.CreateDirectory(options.OutputDirectory);
@@ -105,6 +106,7 @@ internal static class OffscreenSmoke
         bitmap.Save(outputPath);
         ScreenshotVerifier.VerifyPng(outputPath, "offscreen");
         ScreenshotVerifier.VerifyImageBrushMarker(outputPath, "offscreen image brush", 196, 16, 48, 32);
+        ScreenshotVerifier.VerifyImageBrushMarker(outputPath, "offscreen transformed image brush", 40, 108, 16, 16);
         VerifyJpegQuality(bitmap, options.OutputDirectory);
         Console.WriteLine($"Offscreen smoke passed. screenshot={outputPath}");
     }
@@ -781,8 +783,15 @@ internal sealed class SmokeSurface : Control
 internal static class SmokeAssets
 {
     public static readonly ImageBrush ImageBrush = CreateImageBrush();
+    public static readonly ImageBrush TransformedImageBrush = CreateImageBrush(
+        TileMode.None,
+        new RelativeRect(0, 0, 0.25, 1, RelativeUnit.Relative),
+        new TranslateTransform(24, 0));
 
-    private static ImageBrush CreateImageBrush()
+    private static ImageBrush CreateImageBrush(
+        TileMode tileMode = TileMode.FlipXY,
+        RelativeRect? destinationRect = null,
+        ITransform? transform = null)
     {
         var pixels = new byte[16 * 16 * 4];
         for (var y = 0; y < 16; y++)
@@ -810,8 +819,10 @@ internal static class SmokeAssets
                 16 * 4))
             {
                 Stretch = Stretch.Fill,
-                TileMode = TileMode.FlipXY,
-                SourceRect = new RelativeRect(0, 0, 1, 1, RelativeUnit.Relative)
+                TileMode = tileMode,
+                SourceRect = new RelativeRect(0, 0, 1, 1, RelativeUnit.Relative),
+                DestinationRect = destinationRect ?? RelativeRect.Fill,
+                Transform = transform
             };
         }
         finally

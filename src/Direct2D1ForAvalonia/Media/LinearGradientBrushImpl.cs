@@ -1,4 +1,3 @@
-using System.Numerics;
 using Avalonia.Media;
 using Vortice.Direct2D1;
 
@@ -43,7 +42,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     new BrushProperties
                     {
                         Opacity = (float)brush.Opacity,
-                        Transform = Matrix3x2.Identity,
+                        Transform = BrushTransform.Apply(brush, destinationRect, Matrix.Identity).ToDirect2D(),
                     },
                     stops);
             }
