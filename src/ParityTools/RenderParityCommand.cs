@@ -157,7 +157,7 @@ static void RunRenderer(RenderParityOptions options)
 
     Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(pngPath)) ?? ".");
     Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(rawPath)) ?? ".");
-    bitmap.Save(pngPath);
+    bitmap.Save(pngPath, PngBitmapEncoderOptions.Default);
     WriteRawBgra(bitmap, scene.Size, rawPath);
 }
 

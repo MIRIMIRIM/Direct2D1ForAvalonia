@@ -117,7 +117,7 @@ internal static class OffscreenSmoke
 
         Directory.CreateDirectory(options.OutputDirectory);
         var outputPath = Path.Combine(options.OutputDirectory, "offscreen.png");
-        bitmap.Save(outputPath);
+        bitmap.Save(outputPath, PngBitmapEncoderOptions.Default);
         ScreenshotVerifier.VerifyPng(outputPath, "offscreen");
         ScreenshotVerifier.VerifyImageBrushMarker(outputPath, "offscreen image brush", 196, 16, 48, 32);
         ScreenshotVerifier.VerifyImageBrushMarker(outputPath, "offscreen transformed image brush", 40, 108, 16, 16);
@@ -171,7 +171,7 @@ internal static class OffscreenSmoke
         }
 
         var edgePath = Path.Combine(outputDirectory, "offscreen-edge.png");
-        bitmap.Save(edgePath);
+        bitmap.Save(edgePath, PngBitmapEncoderOptions.Default);
         ScreenshotVerifier.VerifyPng(edgePath, "offscreen edge");
         ScreenshotVerifier.VerifyPixel(edgePath, "axis clip outside", 14, 24, Colors.Red, tolerance: 16);
         ScreenshotVerifier.VerifyPixel(edgePath, "axis clip inside", 34, 24, Colors.Lime, tolerance: 16);
@@ -195,7 +195,7 @@ internal static class OffscreenSmoke
         }
 
         var dpiPath = Path.Combine(outputDirectory, "offscreen-dpi192.png");
-        bitmap.Save(dpiPath);
+        bitmap.Save(dpiPath, PngBitmapEncoderOptions.Default);
         ScreenshotVerifier.VerifyPng(dpiPath, "offscreen high DPI");
         ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI fill", 56, 48, Colors.Lime, tolerance: 16);
         ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI background", 140, 48, Colors.White, tolerance: 16);
@@ -236,8 +236,8 @@ internal static class OffscreenSmoke
         var lowQualityPath = Path.Combine(outputDirectory, "offscreen-q15.jpg");
         var highQualityPath = Path.Combine(outputDirectory, "offscreen-q95.jpg");
 
-        bitmap.Save(lowQualityPath, quality: 15);
-        bitmap.Save(highQualityPath, quality: 95);
+        bitmap.Save(lowQualityPath, new JpegBitmapEncoderOptions { Quality = 15 });
+        bitmap.Save(highQualityPath, new JpegBitmapEncoderOptions { Quality = 95 });
 
         var lowQualityLength = new FileInfo(lowQualityPath).Length;
         var highQualityLength = new FileInfo(highQualityPath).Length;
@@ -1089,7 +1089,7 @@ internal static class WindowScreenshot
                     new PixelSize(width, height),
                     new Vector(96, 96),
                     width * 4);
-                avaloniaBitmap.Save(path);
+                avaloniaBitmap.Save(path, PngBitmapEncoderOptions.Default);
             }
             finally
             {

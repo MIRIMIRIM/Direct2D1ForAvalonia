@@ -11,6 +11,7 @@ using MIR.DirectWriteFontsForAvalonia;
 using MIR.Direct2D1ForAvalonia.Media;
 using MIR.DirectWriteForAvalonia;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using Avalonia.Media.TextFormatting;
 using Vortice.DirectWrite;
 using ParityTools.Baseline;
@@ -380,7 +381,7 @@ internal static class TextParityCommand
             }
 
             using var fs = File.Open(comparePath, FileMode.Create, FileAccess.Write, FileShare.Read);
-            bmp.Save(fs);
+            bmp.Save(fs, PngBitmapEncoderOptions.Default);
         }
 
         return (dwPath, hbPath, comparePath);
@@ -406,7 +407,7 @@ internal static class TextParityCommand
         }
 
         using var fs = File.Open(path, FileMode.Create, FileAccess.Write, FileShare.Read);
-        bmp.Save(fs);
+        bmp.Save(fs, PngBitmapEncoderOptions.Default);
     }
 
     private static double ComputeRunWidthDip(IReadOnlyList<GlyphInfo> glyphs)

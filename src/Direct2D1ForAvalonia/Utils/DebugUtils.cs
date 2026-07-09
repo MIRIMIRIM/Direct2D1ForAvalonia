@@ -1,3 +1,5 @@
+using System.IO;
+using Avalonia.Media.Imaging;
 using MIR.Direct2D1ForAvalonia.Media.Imaging;
 using Vortice.Direct2D1;
 
@@ -8,7 +10,8 @@ namespace MIR.Direct2D1ForAvalonia.Utils
         public static void Save(ID2D1BitmapRenderTarget bitmap, string filename)
         {
             var rtb = new D2DRenderTargetBitmapImpl(bitmap);
-            rtb.Save(filename);
+            using var stream = new FileStream(filename, FileMode.Create);
+            rtb.Save(stream, PngBitmapEncoderOptions.Default);
         }
     }
 }

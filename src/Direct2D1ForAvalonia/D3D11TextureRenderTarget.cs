@@ -3,6 +3,7 @@
 using System;
 using System.Runtime.InteropServices;
 using Avalonia.Platform;
+using Avalonia.Rendering.Composition;
 using Avalonia.Win32.DirectX;
 using MIR.Direct2D1ForAvalonia.Diagnostics;
 using MIR.Direct2D1ForAvalonia.Media;
@@ -17,7 +18,8 @@ namespace MIR.Direct2D1ForAvalonia
     {
         private const int MaxCachedTextureTargets = 4;
 
-        private readonly IDirect3D11TextureRenderTarget _target;
+        private readonly IDirect3D11TextureRenderTarget? _target;
+        private readonly IDirect3D11TextureRenderTarget2? _target2;
         private readonly ID2D1DeviceContext _deviceContext;
         private readonly TextureTargetCacheEntry?[] _textureTargetCache = new TextureTargetCacheEntry?[MaxCachedTextureTargets];
         private Vector _lastDpi = new Vector(96, 96);
@@ -29,9 +31,22 @@ namespace MIR.Direct2D1ForAvalonia
             IDirect3D11TexturePlatformSurface surface,
             IPlatformGraphicsContext graphicsContext)
         {
-            _target = surface.CreateRenderTarget(
-                graphicsContext,
-                Direct2D1Platform.Direct3D11Device.NativePointer);
+            // Prefer the 12.1 IDirect3D11TexturePlatformSurface2 path, which passes
+            // scene info (including transparency level) to BeginDraw. Fall back to the
+            // original interface for surfaces that don't implement the *2 variant.
+            if (surface is IDirect3D11TexturePlatformSurface2 surface2)
+            {
+                _target2 = surface2.CreateRenderTarget(
+                    graphicsContext,
+                    Direct2D1Platform.Direct3D11Device.NativePointer);
+            }
+            else
+            {
+                _target = surface.CreateRenderTarget(
+                    graphicsContext,
+                    Direct2D1Platform.Direct3D11Device.NativePointer);
+            }
+
             _deviceContext = Direct2D1Platform.Direct2D1Device.CreateDeviceContext(DeviceContextOptions.None);
         }
 
@@ -42,7 +57,8 @@ namespace MIR.Direct2D1ForAvalonia
         };
 
         public PlatformRenderTargetState PlatformRenderTargetState =>
-            _disposed ? PlatformRenderTargetState.Disposed : _target.State;
+            _disposed ? PlatformRenderTargetState.Disposed
+                : (_target2?.State ?? _target!.State);
 
         public IDrawingContextImpl CreateDrawingContext(
             IRenderTarget.RenderTargetSceneInfo sceneInfo,
@@ -56,7 +72,7 @@ namespace MIR.Direct2D1ForAvalonia
             properties = default;
 
             var frameId = ++_frameId;
-            var session = _target.BeginDraw();
+            var session = _target2?.BeginDraw(sceneInfo) ?? _target!.BeginDraw();
             TextureTargetCacheEntry? targetEntry = null;
 
             try
@@ -65,7 +81,8 @@ namespace MIR.Direct2D1ForAvalonia
                 {
                     Direct2D1Diagnostics.Write(
                         $"d3d11-texture-frame begin id={frameId} " +
-                        $"targetState={_target.State} sceneSize={FormatSize(sceneInfo.Size)} sceneScaling={sceneInfo.Scaling:0.###} " +
+                        $"targetState={PlatformRenderTargetState} sceneSize={FormatSize(sceneInfo.Size)} sceneScaling={sceneInfo.Scaling:0.###} " +
+                        $"transparency={sceneInfo.TransparencyLevel} " +
                         $"sessionSize={FormatSize(session.Size)} sessionScaling={session.Scaling:0.###} sessionOffset={FormatPoint(session.Offset)} " +
                         $"texture=0x{session.D3D11Texture2D.ToInt64():X}");
                 }
@@ -167,7 +184,10 @@ namespace MIR.Direct2D1ForAvalonia
             _deviceContext.Target = null;
             ClearTextureTargetCache();
             _deviceContext.Dispose();
-            _target.Dispose();
+            if (_target2 is not null)
+                _target2.Dispose();
+            else
+                _target?.Dispose();
         }
 
         private bool TryGetTextureTarget(IntPtr texturePointer, PixelSize pixelSize, Vector dpi, out TextureTargetCacheEntry entry)

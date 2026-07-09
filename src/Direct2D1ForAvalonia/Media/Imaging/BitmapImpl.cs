@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using SharpGen.Runtime.Win32;
 using Vortice.Direct2D1;
@@ -15,17 +16,23 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public abstract OptionalDispose<ID2D1Bitmap1> GetDirect2DBitmap(ID2D1RenderTarget target);
 
-        public void Save(string fileName, int? quality = null)
+        public void Save(Stream stream, BitmapEncoderOptions options)
         {
-            var containerFormat = GetContainerFormat(fileName);
-
-            using (FileStream s = new FileStream(fileName, FileMode.Create))
-            {
-                Save(s, containerFormat, quality);
-            }
+            var (containerFormat, quality) = MapEncoderOptions(options);
+            Save(stream, containerFormat, quality);
         }
 
-        public void Save(Stream stream, int? quality = null) => Save(stream, ContainerFormat.Png, quality);
+        /// <summary>
+        /// Maps a <see cref="BitmapEncoderOptions"/> instance to a WIC container format and optional quality value.
+        /// </summary>
+        private static (ContainerFormat containerFormat, int? quality) MapEncoderOptions(BitmapEncoderOptions options)
+        {
+            if (options is JpegBitmapEncoderOptions jpeg)
+                return (ContainerFormat.Jpeg, jpeg.Quality);
+
+            // PngBitmapEncoderOptions and any future format default to PNG with no quality setting.
+            return (ContainerFormat.Png, null);
+        }
 
         /// <summary>
         /// Encodes the bitmap to <paramref name="stream"/> in the requested WIC container format.
@@ -43,33 +50,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
             var normalizedQuality = Math.Clamp(quality.Value, 0, 100) / 100.0f;
             encoderOptions.Set("ImageQuality", normalizedQuality);
-        }
-
-        /// <summary>
-        /// Maps a file extension to a WIC container format, defaulting to PNG.
-        /// </summary>
-        private static ContainerFormat GetContainerFormat(string fileName)
-        {
-            var ext = Path.GetExtension(fileName.AsSpan());
-            if (ext.IsEmpty)
-                return ContainerFormat.Png;
-
-            // Compare case-insensitively without the leading dot.
-            if (ext.Length > 1)
-                ext = ext.Slice(1);
-
-            if (ext.Equals("jpg", StringComparison.OrdinalIgnoreCase) || ext.Equals("jpeg", StringComparison.OrdinalIgnoreCase))
-                return ContainerFormat.Jpeg;
-            if (ext.Equals("bmp", StringComparison.OrdinalIgnoreCase))
-                return ContainerFormat.Bmp;
-            if (ext.Equals("tif", StringComparison.OrdinalIgnoreCase) || ext.Equals("tiff", StringComparison.OrdinalIgnoreCase))
-                return ContainerFormat.Tiff;
-            if (ext.Equals("gif", StringComparison.OrdinalIgnoreCase))
-                return ContainerFormat.Gif;
-            if (ext.Equals("webp", StringComparison.OrdinalIgnoreCase))
-                return ContainerFormat.Webp;
-
-            return ContainerFormat.Png;
         }
 
         public virtual void Dispose()

@@ -618,10 +618,21 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 var dxGlyphRun = immutableGlyphRun.GlyphRun;
                 var previousTextAntialiasMode = _deviceContext.TextAntialiasMode;
 
+                // When BaselinePixelAlignment is requested, snap the baseline origin to the
+                // device pixel grid to produce crisper text at small sizes.
+                var baselineOrigin = glyphRun.BaselineOrigin;
+                if (TextOptions.BaselinePixelAlignment == BaselinePixelAlignment.Aligned)
+                {
+                    var dpi = _deviceContext.Dpi;
+                    baselineOrigin = new Point(
+                        Math.Round(baselineOrigin.X * dpi.Width / 96.0) * 96.0 / dpi.Width,
+                        Math.Round(baselineOrigin.Y * dpi.Height / 96.0) * 96.0 / dpi.Height);
+                }
+
                 try
                 {
                     _deviceContext.TextAntialiasMode = GetEffectiveTextAntialiasMode();
-                    _renderTarget.DrawGlyphRun(glyphRun.BaselineOrigin.ToVortice(), dxGlyphRun,
+                    _renderTarget.DrawGlyphRun(baselineOrigin.ToVortice(), dxGlyphRun,
                         brush.PlatformBrush, MeasuringMode.Natural);
                 }
                 finally
@@ -1458,18 +1469,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
         private void ApplyRenderOptions(RenderOptions renderOptions)
         {
             _deviceContext.AntialiasMode = renderOptions.EdgeMode != EdgeMode.Aliased ? AntialiasMode.PerPrimitive : AntialiasMode.Aliased;
-#pragma warning disable CS0618
-            _deviceContext.TextAntialiasMode = GetTextAntialiasMode(renderOptions.TextRenderingMode);
-#pragma warning restore CS0618
         }
 
         private TextAntialiasMode GetEffectiveTextAntialiasMode()
         {
-#pragma warning disable CS0618
-            var textRenderingMode = TextOptions.TextRenderingMode != TextRenderingMode.Unspecified
-                ? TextOptions.TextRenderingMode
-                : RenderOptions.TextRenderingMode;
-#pragma warning restore CS0618
+            var textRenderingMode = TextOptions.TextRenderingMode;
 
             if (textRenderingMode == TextRenderingMode.Unspecified)
             {
