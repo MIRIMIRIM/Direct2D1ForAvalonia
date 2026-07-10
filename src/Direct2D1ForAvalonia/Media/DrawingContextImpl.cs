@@ -74,6 +74,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         // Cross-frame device-resource cache keyed on the render target. Used for gradient stop
         // collections, which depend only on stops+spread (not geometry) and so recur every frame.
         private readonly D2DDeviceResourceCache _deviceResources;
+        private readonly SolidRectBatch _solidRectBatch = new();
         private RenderOptions _renderOptions;
         private TextOptions _textOptions;
         private readonly Matrix? _postTransform;
@@ -149,8 +150,14 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// Marks this instance as pooled: session <see cref="Dispose"/> will not release a QI'd
         /// device context so <see cref="ReopenSession"/> can call BeginDraw again.
         /// Must be called before the first session Dispose.
+        /// Also arms command-list deferral for simple solid-rect sessions when still empty.
         /// </summary>
-        internal void EnableSessionReuse() => _retainAcrossSessions = true;
+        internal void EnableSessionReuse()
+        {
+            _retainAcrossSessions = true;
+            // Constructor already opened a session with deferral off; re-arm before any draws.
+            _solidRectBatch.BeginSession(enableCommandListReuse: true);
+        }
 
         /// <summary>
         /// Reopens a previously disposed drawing context for another frame on the same device
@@ -201,6 +208,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             _pushClips = 0;
             _pushOpacities = 0;
             _drawRectangles = 0;
+            _solidRectBatch.BeginSession(enableCommandListReuse: _retainAcrossSessions);
             DrawingContextCallStats.OnSessionOpen(_diagnosticTargetName);
             _deviceContext.BeginDraw();
 
@@ -212,6 +220,15 @@ namespace MIR.Direct2D1ForAvalonia.Media
         }
 
         /// <summary>
+        /// Flushes deferred solid-rect strokes / leaves simple-session deferral (call before any
+        /// non-simple draw or state change that must observe prior primitives).
+        /// </summary>
+        private void FlushPrimitiveBatch()
+        {
+            _solidRectBatch.MarkNonSimple(_deviceContext, _deviceResources);
+        }
+
+        /// <summary>
         /// Gets the current transform of the drawing context.
         /// </summary>
         public Matrix Transform
@@ -219,6 +236,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             get { return _transform; }
             set
             {
+                FlushPrimitiveBatch();
                 FlushDeferredClip();
                 _transform = value;
                 ApplyTransform();
@@ -244,6 +262,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <inheritdoc/>
         public void Clear(Color color)
         {
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             _deviceContext.Clear(color.ToDirect2D());
         }
@@ -285,6 +304,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     Direct2D1Diagnostics.Write(
                         $"drawing-context-dispose begin target={_diagnosticTargetName} hasSwapChain={_swapChain != null} hasFinishedCallback={_finishedCallback != null} hasCleanupCallback={_cleanupCallback != null}");
                 }
+
+                // Stroke multi-batch + optional command-list replay/rebuild for simple sessions.
+                _solidRectBatch.EndSession(_deviceContext, _deviceResources);
 
                 Direct2D1FrameProfiler.MarkEndDrawStart(
                     _softPathHits, _softPathMisses, _layerPushes, _deferredClipFlushes,
@@ -522,6 +544,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="p2">The second point of the line.</param>
         public void DrawLine(IPen? pen, Point p1, Point p2)
         {
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             if (pen?.Brush != null)
             {
@@ -551,6 +574,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="geometry">The geometry.</param>
         public void DrawGeometry(IBrush? brush, IPen? pen, IGeometryImpl geometry)
         {
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             if (brush != null)
             {
@@ -592,6 +616,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (TryDrawSimpleSolidRectangle(brush, pen, rrect, boxShadow))
                 return;
 
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             var rc = rrect.Rect.ToDirect2D();
             var rect = rrect.Rect;
@@ -690,6 +715,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <summary>
         /// Fast path for solid-color fill/stroke rectangles (axis-aligned or uniform rounded).
         /// Covers RoundedRectGrid and typical chrome: no shadows, no active soft clip, solid brushes only.
+        /// Uses <see cref="SolidRectBatch"/> for multi-stroke merge and command-list session replay.
         /// </summary>
         private bool TryDrawSimpleSolidRectangle(
             IBrush? brush,
@@ -718,14 +744,22 @@ namespace MIR.Direct2D1ForAvalonia.Media
             }
 
             ISolidColorBrush? solidStroke = null;
+            float strokeThickness = 0;
+            ID2D1StrokeStyle? strokeStyle = null;
             if (pen is not null)
             {
                 if (pen.Brush is not ISolidColorBrush sp || pen.Thickness <= 0)
                     return false;
                 solidStroke = sp;
+                strokeThickness = (float)pen.Thickness;
+                strokeStyle = GetOrCreateStrokeStyle(pen);
             }
 
             if (solidFill is null && solidStroke is null)
+                return false;
+
+            // Translucent solids: keep immediate ordered path (no batch / no CL).
+            if (solidFill is { Opacity: < 0.999 } || solidStroke is { Opacity: < 0.999 })
                 return false;
 
             FlushDeferredClip();
@@ -745,66 +779,19 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 {
                     return false; // non-uniform / clamp case → full path
                 }
-
-                var rounded = new RoundedRectangle
-                {
-                    Rect = rect.ToDirect2D(),
-                    RadiusX = (float)rrect.RadiiTopLeft.X,
-                    RadiusY = (float)rrect.RadiiTopLeft.Y
-                };
-
-                if (solidFill is not null)
-                {
-                    var fill = _deviceResources.GetOrCreateSolidBrush(
-                        _deviceContext, solidFill.Color, solidFill.Opacity);
-                    if (fill.PlatformBrush is not null)
-                        _deviceContext.FillRoundedRectangle(rounded, fill.PlatformBrush);
-                }
-
-                if (solidStroke is not null && pen is not null)
-                {
-                    var stroke = _deviceResources.GetOrCreateSolidBrush(
-                        _deviceContext, solidStroke.Color, solidStroke.Opacity);
-                    if (stroke.PlatformBrush is not null)
-                    {
-                        var thickness = (float)pen.Thickness;
-                        var style = GetOrCreateStrokeStyle(pen);
-                        if (style is null)
-                            _deviceContext.DrawRoundedRectangle(rounded, stroke.PlatformBrush, thickness);
-                        else
-                            _deviceContext.DrawRoundedRectangle(rounded, stroke.PlatformBrush, thickness, style);
-                    }
-                }
-
-                return true;
             }
 
-            // Axis-aligned solid rect.
-            var rc = rect.ToDirect2D();
-            if (solidFill is not null)
-            {
-                var fill = _deviceResources.GetOrCreateSolidBrush(
-                    _deviceContext, solidFill.Color, solidFill.Opacity);
-                if (fill.PlatformBrush is not null)
-                    _deviceContext.FillRectangle(rc, fill.PlatformBrush);
-            }
-
-            if (solidStroke is not null && pen is not null)
-            {
-                var stroke = _deviceResources.GetOrCreateSolidBrush(
-                    _deviceContext, solidStroke.Color, solidStroke.Opacity);
-                if (stroke.PlatformBrush is not null)
-                {
-                    var thickness = (float)pen.Thickness;
-                    var style = GetOrCreateStrokeStyle(pen);
-                    if (style is null)
-                        _deviceContext.DrawRectangle(rc, stroke.PlatformBrush, thickness);
-                    else
-                        _deviceContext.DrawRectangle(rc, stroke.PlatformBrush, thickness, style);
-                }
-            }
-
-            return true;
+            return _solidRectBatch.HandleSimpleRect(
+                _deviceContext,
+                _deviceResources,
+                rrect,
+                isRounded,
+                isRounded ? (float)rrect.RadiiTopLeft.X : 0,
+                isRounded ? (float)rrect.RadiiTopLeft.Y : 0,
+                solidFill,
+                solidStroke,
+                strokeThickness,
+                strokeStyle);
         }
 
         /// <summary>
@@ -864,6 +851,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <inheritdoc />
         public void DrawEllipse(IBrush? brush, IPen? pen, Rect rect)
         {
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             var rc = rect.ToDirect2D();
 
@@ -1618,6 +1606,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// </summary>
         private void FlushDeferredClip()
         {
+            // Solid-rect stroke batch must land before clip/layer state changes.
+            if (_solidRectBatch.HasDeferredStrokes || _solidRectBatch.IsDeferredSimpleSession)
+                FlushPrimitiveBatch();
+
             // Standalone soft opacity cannot stay deferred across a hard clip/layer boundary.
             FlushStandaloneSoftOpacity();
 
@@ -1782,6 +1774,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
             var standalone = _standaloneSoftOpacity ?? 1f;
             var bakedOpacity = clipOpacity * standalone;
+            // Soft draws leave the simple-rect session; flush any deferred strokes first.
+            FlushPrimitiveBatch();
             _softPathHits++;
             DrawingContextCallStats.OnSoftHit(_diagnosticTargetName);
 
