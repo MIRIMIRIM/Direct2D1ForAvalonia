@@ -1023,8 +1023,21 @@ namespace MIR.Direct2D1ForAvalonia.Media
         }
 
         /// <summary>
-        /// Composition intermediate Blit (Source replace). Avoids blend-mode stack and uses
-        /// nearest-neighbour sampling — pixel-perfect and cheaper than Fancy for layer blits.
+        /// Clears the current session target to transparent. Used when a pooled composition layer
+        /// is opened so content matches Skia/Avalonia "fresh intermediate" semantics.
+        /// Must be called only while a draw session is open (after BeginDraw).
+        /// </summary>
+        internal void ClearLayerToTransparent()
+        {
+            if (!_sessionOpen)
+                return;
+            _deviceContext.Clear(new Vortice.Mathematics.Color4(0, 0, 0, 0));
+        }
+
+        /// <summary>
+        /// Composition intermediate Blit (Source replace — same as Avalonia Skia layer blit).
+        /// Nearest-neighbour sampling: layers are pixel-aligned; fancy filtering would diverge
+        /// from Skia and soft edges. SourceCopy = clear dest then draw (not SourceOver).
         /// </summary>
         internal void BlitCompositionLayer(BitmapImpl source, Rect rect)
         {

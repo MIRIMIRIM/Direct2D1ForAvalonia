@@ -630,28 +630,47 @@ internal sealed class VisualTreeBenchPanel : Panel, IFrameCounter
     public VisualTreeBenchPanel(RenderBenchScene scene, int grid)
     {
         grid = Math.Clamp(grid, 2, 16);
-        var cellW = Math.Max(32, scene.Size.Width / grid);
-        var cellH = Math.Max(32, scene.Size.Height / grid);
-        Width = cellW * grid;
-        Height = cellH * grid;
+        var baseW = Math.Max(48, scene.Size.Width / grid);
+        var baseH = Math.Max(48, scene.Size.Height / grid);
+        // Slightly different cell sizes so CreateLayer keys diversify (pool stress).
+        // Still tile without overlap using each cell's own pitch.
+        double totalW = 0, totalH = 0;
+        var pitchesX = new double[grid];
+        var pitchesY = new double[grid];
+        for (var i = 0; i < grid; i++)
+        {
+            pitchesX[i] = baseW + (i % 3) * 12;
+            pitchesY[i] = baseH + (i % 2) * 10;
+            totalW += pitchesX[i];
+            totalH += pitchesY[i];
+        }
+
+        Width = totalW;
+        Height = totalH;
         Background = Brushes.Black;
 
+        double yOff = 0;
         for (var y = 0; y < grid; y++)
         {
+            double xOff = 0;
             for (var x = 0; x < grid; x++)
             {
+                var cellW = pitchesX[x];
+                var cellH = pitchesY[y];
                 var cell = new SceneCell(scene, cellW, cellH)
                 {
                     Width = cellW,
                     Height = cellH,
-                    // Panel layout: place cells with margin (no Canvas required).
-                    Margin = new Thickness(x * cellW, y * cellH, 0, 0),
+                    Margin = new Thickness(xOff, yOff, 0, 0),
                     HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
                     VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top,
                 };
                 _cells.Add(cell);
                 Children.Add(cell);
+                xOff += cellW;
             }
+
+            yOff += pitchesY[y];
         }
     }
 

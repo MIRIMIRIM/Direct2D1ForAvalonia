@@ -16,6 +16,12 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
         private bool _poolEnabled;
         /// <summary>Currently sitting in the pool (Dispose is a no-op until rented again).</summary>
         private bool _inPool;
+        /// <summary>
+        /// After pool rent (or first attach), clear to transparent on the next BeginDraw so
+        /// reused GPU content cannot leak through unpainted regions — matches Skia/Avalonia
+        /// "fresh layer is transparent" expectations.
+        /// </summary>
+        private bool _clearOnNextSession;
         private D2DCompatibleLayerPool.LayerKey _poolKey;
         private bool _nativeDisposed;
 
@@ -60,6 +66,8 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
             _poolEnabled = true;
             _inPool = false;
             _poolKey = key;
+            // CreateCompatible leaves content undefined; Skia intermediates start clear/transparent.
+            _clearOnNextSession = true;
         }
 
         /// <summary>
@@ -70,6 +78,7 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
         {
             _inPool = false;
             Version++;
+            _clearOnNextSession = true;
         }
 
         /// <summary>
@@ -106,6 +115,15 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
             else
             {
                 _reusableDrawingContext.ReopenSession(finishedCallback: finishedCallback);
+            }
+
+            // Pooled layers retain prior GPU pixels until cleared. Avalonia/Skia treat a newly
+            // obtained intermediate as transparent; without this, unpainted corners/holes would
+            // show stale content after rent (Source blit would then copy garbage).
+            if (_clearOnNextSession)
+            {
+                _reusableDrawingContext.ClearLayerToTransparent();
+                _clearOnNextSession = false;
             }
 
             return _reusableDrawingContext;
