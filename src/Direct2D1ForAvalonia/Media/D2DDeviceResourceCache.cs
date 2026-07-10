@@ -174,12 +174,13 @@ internal sealed class D2DDeviceResourceCache
         D2DDeviceResourceCache? cache;
         lock (s_deviceTableLock)
         {
-            if (!s_deviceCaches.Remove(native, out cache))
-                return;
-            cache._leaseCount = 0;
+            if (s_deviceCaches.Remove(native, out cache))
+                cache._leaseCount = 0;
         }
 
-        cache.ReleaseNativeResources();
+        cache?.ReleaseNativeResources();
+        // Compatible composition layers share the same device; drop them on loss too.
+        Imaging.D2DCompatibleLayerPool.Clear();
     }
 
     /// <summary>

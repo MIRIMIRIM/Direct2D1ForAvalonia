@@ -371,6 +371,26 @@ namespace MIR.Direct2D1ForAvalonia.Media
         }
 
         /// <summary>
+        /// Axis-aligned clip fence that preserves simple-session command-list deferral.
+        /// Composition intermediates wrap paints in bounds clips; killing CL here was the main
+        /// reason windowed Sess/Off stayed ~3× despite device CL working offscreen.
+        /// </summary>
+        private void FenceSimpleSessionForAxisAlignedClip(Rect clip)
+        {
+            FlushLineBatch();
+            FlushEllipseStrokeBatch();
+            if (_solidRectBatch.IsDeferredSimpleSession)
+            {
+                _solidRectBatch.FlushStrokesOnly(_deviceContext, _deviceResources);
+                _solidRectBatch.MixClipHash(clip);
+            }
+            else
+            {
+                _solidRectBatch.MarkNonSimple(_deviceContext, _deviceResources);
+            }
+        }
+
+        /// <summary>
         /// Non-rect draws under pure soft opacity must open a real layer first so deferred solids
         /// composite as a group. Rect draws use <see cref="TryDrawRectangleWithPureSoftOpacity"/>.
         /// </summary>
@@ -951,23 +971,14 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 {
                     if (compositeMode == CompositeMode.SourceCopy)
                     {
-                        // SourceCopy ≡ clear dest then SourceOver, for the dest rectangle only.
-                        _deviceContext.PushAxisAlignedClip(destRect.ToVortice(), AntialiasMode.Aliased);
-                        try
-                        {
-                            _deviceContext.Clear(new Vortice.Mathematics.Color4(0, 0, 0, 0));
-                            _deviceContext.DrawBitmap(
-                                d2d.Value,
-                                destRect.ToVortice(),
-                                (float)opacity,
-                                interpolationMode,
-                                sourceRect.ToVortice(),
-                                null);
-                        }
-                        finally
-                        {
-                            _deviceContext.PopAxisAlignedClip();
-                        }
+                        // SourceCopy ≡ clear dest then SourceOver. Composition layer Blit hits this
+                        // path every frame; keep it lean (nearest-neighbour, skip clip when full).
+                        DrawBitmapSourceCopy(
+                            d2d.Value,
+                            destRect,
+                            sourceRect,
+                            (float)opacity,
+                            interpolationMode);
                     }
                     else
                     {
@@ -1009,6 +1020,64 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Composition intermediate Blit (Source replace). Avoids blend-mode stack and uses
+        /// nearest-neighbour sampling — pixel-perfect and cheaper than Fancy for layer blits.
+        /// </summary>
+        internal void BlitCompositionLayer(BitmapImpl source, Rect rect)
+        {
+            EnsurePureSoftOpacityAllowsNonRect();
+            FlushPrimitiveBatch();
+            FlushDeferredClip();
+            using var d2d = source.GetDirect2DBitmap(_deviceContext);
+            DrawBitmapSourceCopy(
+                d2d.Value,
+                rect,
+                rect,
+                opacity: 1f,
+                InterpolationMode.NearestNeighbor);
+        }
+
+        private void DrawBitmapSourceCopy(
+            ID2D1Bitmap bitmap,
+            Rect destRect,
+            Rect sourceRect,
+            float opacity,
+            InterpolationMode interpolationMode)
+        {
+            var dest = destRect.ToVortice();
+            var src = sourceRect.ToVortice();
+
+            // Full-target replace: Clear the whole RT then DrawBitmap — no push/pop clip.
+            if (IsFullTargetDest(destRect))
+            {
+                _deviceContext.Clear(new Vortice.Mathematics.Color4(0, 0, 0, 0));
+                _deviceContext.DrawBitmap(bitmap, dest, opacity, interpolationMode, src, null);
+                return;
+            }
+
+            _deviceContext.PushAxisAlignedClip(dest, AntialiasMode.Aliased);
+            try
+            {
+                _deviceContext.Clear(new Vortice.Mathematics.Color4(0, 0, 0, 0));
+                _deviceContext.DrawBitmap(bitmap, dest, opacity, interpolationMode, src, null);
+            }
+            finally
+            {
+                _deviceContext.PopAxisAlignedClip();
+            }
+        }
+
+        private bool IsFullTargetDest(Rect destRect)
+        {
+            // Compare in DIPs against the current device context size (includes DPI scaling).
+            var size = _deviceContext.Size;
+            return destRect.X <= 0.5
+                   && destRect.Y <= 0.5
+                   && destRect.Width + destRect.X + 0.5 >= size.Width
+                   && destRect.Height + destRect.Y + 0.5 >= size.Height;
         }
 
         private static InterpolationMode GetInterpolationMode(BitmapInterpolationMode interpolationMode)
@@ -1719,7 +1788,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
             _pushClips++;
             DrawingContextCallStats.OnPushClip();
             EnsurePureSoftOpacityAllowsNonRect();
-            FlushPrimitiveBatch();
+            // Axis-aligned clips are composition-common (control bounds). Keep simple-session CL
+            // deferral alive — MarkNonSimple would destroy intermediate CL reuse every frame.
+            FenceSimpleSessionForAxisAlignedClip(clip);
             FlushDeferredClip();
             _clipStack.Push(ClipEntry.AxisAligned());
             _deviceContext.PushAxisAlignedClip(clip.ToVortice(), AntialiasMode.PerPrimitive);
@@ -1730,9 +1801,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
             _pushClips++;
             DrawingContextCallStats.OnPushClip();
             EnsurePureSoftOpacityAllowsNonRect();
-            // Fence deferred primitives on both push sides (including the zero-radius AA path).
-            FlushPrimitiveBatch();
-            FlushDeferredClip();
 
             var radiusX = Math.Max(clip.RadiiTopLeft.X,
                 Math.Max(clip.RadiiTopRight.X, Math.Max(clip.RadiiBottomRight.X, clip.RadiiBottomLeft.X)));
@@ -1742,10 +1810,16 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (radiusX <= 0 || radiusY <= 0)
             {
                 // No rounding: a plain axis-aligned clip is cheaper and exactly equivalent.
+                FenceSimpleSessionForAxisAlignedClip(clip.Rect);
+                FlushDeferredClip();
                 _clipStack.Push(ClipEntry.AxisAligned());
                 _deviceContext.PushAxisAlignedClip(clip.Rect.ToDirect2D(), AntialiasMode.PerPrimitive);
                 return;
             }
+
+            // Fence deferred primitives on both push sides for geometric clips.
+            FlushPrimitiveBatch();
+            FlushDeferredClip();
 
             // Direct2D has no native rounded-rect clip. Defer both layer creation and geometry
             // allocation: a following PushOpacity can soft-merge, and compatible solid fills can
@@ -2201,8 +2275,24 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 EmitSoftOpacityPending(bakeOpacity: true);
             }
 
-            // Primitives deferred under a real clip/layer must flush before pop.
-            FlushPrimitiveBatch();
+            var topState = _clipStack.Count > 0 ? _clipStack.Peek().State : ClipState.AxisAligned;
+
+            // Axis-aligned composition clips: commit deferred simple ops under the live clip
+            // (CL hit/miss) without MarkNonSimple, so the next frame can still hit the device CL.
+            if (topState == ClipState.AxisAligned
+                && _solidRectBatch.IsDeferredSimpleSession
+                && _solidRectBatch.HasPendingOps)
+            {
+                FlushLineBatch();
+                FlushEllipseStrokeBatch();
+                _solidRectBatch.CommitDeferredUnderCurrentClip(
+                    _deviceContext, _deviceResources, _sessionTargetImage);
+            }
+            else
+            {
+                // Primitives deferred under a real clip/layer must flush before pop.
+                FlushPrimitiveBatch();
+            }
 
             // Only materialise Deferred/SoftMerged when something still needs a geometric mask
             // (e.g. SoftMerged multi-draw already forced a pending emit path via FlushDeferredClip

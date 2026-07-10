@@ -134,7 +134,7 @@ namespace MIR.Direct2D1ForAvalonia
         public IDrawingContextLayerImpl CreateLayer(Size size)
         {
             var renderTarget = _externalRenderTargetProvider.GetOrCreateRenderTarget();
-            return D2DRenderTargetBitmapImpl.CreateCompatible(renderTarget, size);
+            return D2DRenderTargetBitmapImpl.CreateCompatiblePooled(renderTarget, size);
         }
     }
 }

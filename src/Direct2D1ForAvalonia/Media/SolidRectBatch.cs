@@ -125,6 +125,87 @@ internal sealed class SolidRectBatch
         }
     }
 
+    /// <summary>
+    /// Folds an axis-aligned clip into the content hash so a CL recorded under one clip is never
+    /// replayed under another (Avalonia composition wraps intermediate paints in bounds clips).
+    /// </summary>
+    public void MixClipHash(Rect clip)
+    {
+        if (!_active)
+            return;
+        unchecked
+        {
+            _sessionHash ^= clip.X.GetHashCode();
+            _sessionHash *= 1099511628211;
+            _sessionHash ^= clip.Y.GetHashCode();
+            _sessionHash *= 1099511628211;
+            _sessionHash ^= clip.Width.GetHashCode();
+            _sessionHash *= 1099511628211;
+            _sessionHash ^= clip.Height.GetHashCode();
+            _sessionHash *= 1099511628211;
+        }
+    }
+
+    /// <summary>
+    /// Flushes deferred strokes without killing command-list deferral (AA clip push/pop).
+    /// </summary>
+    public void FlushStrokesOnly(ID2D1DeviceContext dc, D2DDeviceResourceCache resources)
+    {
+        if (!_active)
+            return;
+        FlushStrokes(dc, resources);
+    }
+
+    /// <summary>
+    /// Commits deferred simple ops under the current DC clip stack (hit CL / miss paint+maybe record)
+    /// without ending the session — used when Avalonia PopClip would otherwise MarkNonSimple and
+    /// destroy composition intermediate CL reuse.
+    /// </summary>
+    public void CommitDeferredUnderCurrentClip(
+        ID2D1DeviceContext dc,
+        D2DDeviceResourceCache resources,
+        ID2D1Image? sessionTarget)
+    {
+        if (!_active || !_deferSimpleSession || !_sessionOnlySimple || _ops.Count == 0)
+        {
+            FlushStrokes(dc, resources);
+            return;
+        }
+
+        DebugLastOpCount = _ops.Count;
+        DebugDeferredEnds++;
+        var contentHash = ContentHash;
+        var opCount = _ops.Count;
+        if (resources.TryGetCommandList(contentHash, _pixelW, _pixelH, out var cached))
+        {
+            CommandListHits++;
+            try
+            {
+                dc.DrawImage(cached);
+            }
+            finally
+            {
+                cached.Dispose();
+            }
+            RememberEndedSession(contentHash, opCount);
+            _ops.Clear();
+            _strokes.Clear();
+            return;
+        }
+
+        CommandListMisses++;
+        ExecuteOps(dc, resources, buildStrokeBatch: true);
+        var stableRepeat = _hasLastEndedSession
+            && contentHash == _lastEndedContentHash
+            && opCount == _lastEndedOpCount
+            && opCount >= MinOpsToRecordCommandList;
+        if (stableRepeat)
+            TryRecordOpsToCommandListStoreOnly(dc, resources, sessionTarget);
+        RememberEndedSession(contentHash, opCount);
+        _ops.Clear();
+        _strokes.Clear();
+    }
+
     public void MarkNonSimple(ID2D1DeviceContext dc, D2DDeviceResourceCache resources)
     {
         if (!_active)

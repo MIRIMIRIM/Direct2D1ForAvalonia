@@ -57,7 +57,7 @@ namespace MIR.Direct2D1ForAvalonia
 
         public IDrawingContextLayerImpl CreateLayer(Size size)
         {
-            return D2DRenderTargetBitmapImpl.CreateCompatible(_renderTarget, size);
+            return D2DRenderTargetBitmapImpl.CreateCompatiblePooled(_renderTarget, size);
         }
 
         public void Dispose()

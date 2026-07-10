@@ -341,6 +341,13 @@ internal static class WindowedRenderBenchmarkCommand
         Console.WriteLine("  Process-wide DrawingContextImpl calls during window phase only:");
         Console.WriteLine(DrawingContextCallStats.Format(globals));
         Console.WriteLine();
+        Console.WriteLine(
+            $"  Composition layer pool: hits={MIR.Direct2D1ForAvalonia.Media.Imaging.D2DCompatibleLayerPool.Hits}  " +
+            $"misses={MIR.Direct2D1ForAvalonia.Media.Imaging.D2DCompatibleLayerPool.Misses}  " +
+            $"returns={MIR.Direct2D1ForAvalonia.Media.Imaging.D2DCompatibleLayerPool.Returns}  " +
+            $"discards={MIR.Direct2D1ForAvalonia.Media.Imaging.D2DCompatibleLayerPool.Discards}  " +
+            $"pooled={MIR.Direct2D1ForAvalonia.Media.Imaging.D2DCompatibleLayerPool.PooledCount}");
+        Console.WriteLine();
 
         var phases = report.Windowed;
         var presentish = phases.MedianCleanupMs + phases.MedianFlushMs + phases.MedianEndDrawMs;
@@ -439,7 +446,8 @@ internal static class WindowedRenderBenchmarkCommand
             var wall = r.Windowed.WallMedianFrameMs;
             var sOff = off > 0 ? sess / off : 0;
             var wOff = off > 0 ? wall / off : 0;
-            var note = sOff > 2.0 && sess > 1.0
+            // Absolute session ms is often <1 on modern GPUs; classify by ratio only.
+            var note = sOff > 2.0
                 ? "composition-heavy"
                 : sOff < 1.5
                     ? "draw-bound"
@@ -480,6 +488,7 @@ internal sealed class WindowedBenchApp : Application
         // Window-phase stats only (drop offscreen noise).
         Direct2D1FrameProfiler.Reset();
         DrawingContextCallStats.Reset();
+        MIR.Direct2D1ForAvalonia.Media.Imaging.D2DCompatibleLayerPool.ResetStats();
 
         Control content;
         IFrameCounter frameCounter;

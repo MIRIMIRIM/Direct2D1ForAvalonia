@@ -267,7 +267,7 @@ namespace MIR.Direct2D1ForAvalonia
         {
             EnsureNotDisposed();
             // GPU-compatible intermediate target, matching D3D11TextureRenderTarget's layer needs.
-            return D2DRenderTargetBitmapImpl.CreateCompatible(_deviceContext, size);
+            return D2DRenderTargetBitmapImpl.CreateCompatiblePooled(_deviceContext, size);
         }
 
         private void EnsureNotDisposed()

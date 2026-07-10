@@ -12,6 +12,12 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
         private readonly ID2D1BitmapRenderTarget _renderTarget = renderTarget;
         private DrawingContextImpl? _reusableDrawingContext;
         private bool? _reusableUseScaledDrawing;
+        /// <summary>Eligible to return to <see cref="D2DCompatibleLayerPool"/> on Dispose.</summary>
+        private bool _poolEnabled;
+        /// <summary>Currently sitting in the pool (Dispose is a no-op until rented again).</summary>
+        private bool _inPool;
+        private D2DCompatibleLayerPool.LayerKey _poolKey;
+        private bool _nativeDisposed;
 
         public static D2DRenderTargetBitmapImpl CreateCompatible(
             ID2D1RenderTarget renderTarget,
@@ -39,6 +45,41 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
             }
 
             return new D2DRenderTargetBitmapImpl(bitmapRenderTarget);
+        }
+
+        /// <summary>
+        /// Composition-friendly factory: rents a pooled compatible RT when possible.
+        /// </summary>
+        public static D2DRenderTargetBitmapImpl CreateCompatiblePooled(
+            ID2D1RenderTarget renderTarget,
+            Size size)
+            => D2DCompatibleLayerPool.Rent(renderTarget, size);
+
+        internal void AttachToPool(D2DCompatibleLayerPool.LayerKey key)
+        {
+            _poolEnabled = true;
+            _inPool = false;
+            _poolKey = key;
+        }
+
+        /// <summary>
+        /// Called when a pooled layer is rented again — invalidate bitmap consumers and bump
+        /// <see cref="BitmapImpl.Version"/> so blit/upload caches do not reuse stale content.
+        /// </summary>
+        internal void PrepareForPoolReuse()
+        {
+            _inPool = false;
+            Version++;
+        }
+
+        /// <summary>
+        /// Actually releases native resources (used by the pool when discarding).
+        /// </summary>
+        internal void ForceDisposeNative()
+        {
+            _poolEnabled = false;
+            _inPool = false;
+            DisposeCore();
         }
 
         public IDrawingContextImpl CreateDrawingContext() => CreateDrawingContext(useScaledDrawing: false);
@@ -79,31 +120,45 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
 
             var rect = new Rect(PixelSize.ToSizeWithDpi(Dpi));
 
-            // Source blend: replace the destination region (Avalonia composition intermediate).
-            // Prefer DrawBitmap SourceOver after the bitmap is fully closed (EndDraw already
-            // ran on the intermediate). SourceCopy-via-DrawImage has been flaky for GPU
-            // CreateCompatible bitmaps on the D3D11 texture surface; Source + DrawBitmap path
-            // below still uses Source mode but routes through a stable DrawBitmap when possible.
-            d2dContext.PushBitmapBlendMode(Avalonia.Media.Imaging.BitmapBlendingMode.Source);
-            try
-            {
-                d2dContext.DrawBitmap(this, 1, rect, rect);
-            }
-            finally
-            {
-                d2dContext.PopBitmapBlendMode();
-            }
+            // Source replace of the destination region (Avalonia composition intermediate).
+            // Dedicated path: nearest-neighbour, no blend-mode stack, full-target Clear skip-clip.
+            d2dContext.BlitCompositionLayer(this, rect);
         }
 
         public bool CanBlit => true;
 
         public IDrawingContextLayerImpl CreateLayer(Size size)
         {
-            return CreateCompatible(_renderTarget, size);
+            return CreateCompatiblePooled(_renderTarget, size);
         }
 
         public override void Dispose()
         {
+            if (_nativeDisposed)
+                return;
+
+            // Already sitting in the pool — Avalonia double-dispose is a no-op.
+            if (_inPool)
+                return;
+
+            // Composition disposes layers every frame; return to the pool instead of freeing GPU RT.
+            if (_poolEnabled)
+            {
+                _inPool = true;
+                // Keep the reusable DrawingContextImpl for the next rent (session reuse).
+                D2DCompatibleLayerPool.Return(this, _poolKey);
+                return;
+            }
+
+            DisposeCore();
+        }
+
+        private void DisposeCore()
+        {
+            if (_nativeDisposed)
+                return;
+            _nativeDisposed = true;
+
             if (_reusableDrawingContext is not null)
             {
                 _reusableDrawingContext.ReleaseRetainedNativeResources();

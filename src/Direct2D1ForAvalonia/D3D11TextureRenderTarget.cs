@@ -210,10 +210,11 @@ namespace MIR.Direct2D1ForAvalonia
                     $"d3d11-texture-create-layer requestedDip={FormatSize(size)} pixel={FormatSize(pixelSize)} dpi={FormatSize(dpi)}");
             }
 
-            // GPU-compatible intermediate (same device as the window surface). Prefer this over
-            // WIC/CPU layers so flushed soft clips and opacity layers stay on the GPU.
+            // GPU-compatible intermediate (same device as the window surface), rented from the
+            // process-wide pool so composition CreateLayer/Dispose every frame does not pay
+            // CreateCompatibleRenderTarget on steady-state repaints.
             // Avalonia passes size in DIPs; CreateCompatible matches D2D device-independent units.
-            return Media.Imaging.D2DRenderTargetBitmapImpl.CreateCompatible(_deviceContext, size);
+            return Media.Imaging.D2DRenderTargetBitmapImpl.CreateCompatiblePooled(_deviceContext, size);
         }
 
         public void Dispose()
