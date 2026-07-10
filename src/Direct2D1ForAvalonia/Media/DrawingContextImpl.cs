@@ -27,6 +27,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         private readonly ID2D1RenderTarget _renderTarget;
         private readonly ID2D1DeviceContext _deviceContext;
         private readonly bool _ownsDeviceContext;
+        private bool _nativeResourcesReleased;
         private readonly IDXGISwapChain1? _swapChain;
         private Action? _finishedCallback;
         private Action? _cleanupCallback;
@@ -37,6 +38,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
         // When true, Dispose ends a session but keeps the (possibly QI'd) device context alive
         // for ReopenSession. Hosts that pool DrawingContextImpl must set this before first Dispose.
         private bool _retainAcrossSessions;
+        // True when this context backs the window D3D11 texture surface. Only primary-surface
+        // contexts emit profiler EndDraw marks so composition intermediate disposes (which happen
+        // between the window surface's MarkSurfaceBegin and MarkCleanupDone) don't overwrite the
+        // in-flight frame's phase timestamps and counters.
+        private readonly bool _isPrimarySurface;
 
         private readonly Stack<RenderOptions> _renderOptionsStack = new Stack<RenderOptions>();
         private readonly Stack<TextOptions> _textOptionsStack = new Stack<TextOptions>();
@@ -52,9 +58,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
         private readonly Stack<ClipEntry> _clipStack = new Stack<ClipEntry>();
         // Number of soft-merged opacities that did not push a D2D layer (PopOpacity is a no-op).
         private int _softOpacityDepth;
-        // Standalone soft opacity (no rounded clip): bake into solid fills/simple pens.
-        // null = none deferred. Converted to a real layer on incompatible draws.
-        private float? _standaloneSoftOpacity;
         // Lightweight counters for offscreen vs real-window profiling (reset each session).
         private int _softPathHits;
         private int _softPathMisses;
@@ -74,6 +77,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
         // Cross-frame device-resource cache keyed on the render target. Used for gradient stop
         // collections, which depend only on stops+spread (not geometry) and so recur every frame.
         private readonly D2DDeviceResourceCache _deviceResources;
+        // True until ReleaseDeviceCacheLease runs (one For() lease per DrawingContextImpl).
+        private bool _deviceCacheLeased;
         private readonly SolidRectBatch _solidRectBatch = new();
         // Captured at session open for command-list record (dc.Target can be awkward mid-frame).
         private ID2D1Image? _sessionTargetImage;
@@ -110,6 +115,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="finishedCallback">An optional delegate to be called when context is disposed.</param>
         /// <param name="targetTransform">An optional transform required by the target surface.</param>
         /// <param name="cleanupCallback">An optional delegate that is always called when context is disposed.</param>
+        /// <param name="isPrimarySurface">
+        /// True when this context backs the window D3D11 texture surface. Only primary-surface
+        /// contexts emit profiler EndDraw marks so composition intermediate disposes don't
+        /// clobber the in-flight frame's phase timestamps.
+        /// </param>
         public DrawingContextImpl(
             ILayerFactory? layerFactory,
             ID2D1RenderTarget renderTarget,
@@ -117,7 +127,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
             IDXGISwapChain1? swapChain = null,
             Action? finishedCallback = null,
             Matrix? targetTransform = null,
-            Action? cleanupCallback = null)
+            Action? cleanupCallback = null,
+            bool isPrimarySurface = false)
         {
             _layerFactory = layerFactory;
             _renderTarget = renderTarget;
@@ -125,11 +136,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
             _finishedCallback = finishedCallback;
             _targetTransform = targetTransform;
             _cleanupCallback = cleanupCallback;
+            _isPrimarySurface = isPrimarySurface;
             // Prefer the Avalonia host (window texture / bitmap impl) over the raw D2D RCW type so
             // process-wide call stats can distinguish window surface vs intermediate targets.
             _diagnosticTargetName = layerFactory?.GetType().Name
                 ?? (_swapChain is not null ? "SwapChain" : _renderTarget.GetType().Name);
-            _deviceResources = D2DDeviceResourceCache.For(_renderTarget);
 
             if (_renderTarget is ID2D1DeviceContext deviceContext)
             {
@@ -142,24 +153,38 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 _ownsDeviceContext = true;
             }
 
-            if (!useScaledDrawing)
+            try
             {
-                var scaling = _renderTarget.Dpi.Width / 96;
-                if (!AreClose(1, scaling))
-                    _postTransform = Matrix.CreateScale(1 / scaling, 1 / scaling);
-            }
+                // Resolve after QI so compatible bitmap RTs (composition intermediates) share the
+                // native-device cache instead of a cold per-RT ConditionalWeakTable entry.
+                // For() takes a lease released in ReleaseDeviceCacheLease.
+                _deviceResources = D2DDeviceResourceCache.For(_deviceContext);
+                _deviceCacheLeased = true;
 
-            if (Direct2D1Diagnostics.IsEnabled)
+                if (!useScaledDrawing)
+                {
+                    var scaling = _renderTarget.Dpi.Width / 96;
+                    if (!AreClose(1, scaling))
+                        _postTransform = Matrix.CreateScale(1 / scaling, 1 / scaling);
+                }
+
+                if (Direct2D1Diagnostics.IsEnabled)
+                {
+                    Direct2D1Diagnostics.Write(
+                        $"drawing-context-create target={_renderTarget.GetType().Name} " +
+                        $"pixel={_renderTarget.PixelSize.Width}x{_renderTarget.PixelSize.Height} " +
+                        $"dpi={_renderTarget.Dpi.Width:0.###}x{_renderTarget.Dpi.Height:0.###} " +
+                        $"useScaledDrawing={useScaledDrawing} ownsDeviceContext={_ownsDeviceContext} " +
+                        $"postTransform={_postTransform?.ToString() ?? "null"} targetTransform={_targetTransform?.ToString() ?? "null"}");
+                }
+
+                OpenSession();
+            }
+            catch
             {
-                Direct2D1Diagnostics.Write(
-                    $"drawing-context-create target={_renderTarget.GetType().Name} " +
-                    $"pixel={_renderTarget.PixelSize.Width}x{_renderTarget.PixelSize.Height} " +
-                    $"dpi={_renderTarget.Dpi.Width:0.###}x{_renderTarget.Dpi.Height:0.###} " +
-                    $"useScaledDrawing={useScaledDrawing} ownsDeviceContext={_ownsDeviceContext} " +
-                    $"postTransform={_postTransform?.ToString() ?? "null"} targetTransform={_targetTransform?.ToString() ?? "null"}");
+                ReleaseNativeResources();
+                throw;
             }
-
-            OpenSession();
         }
 
         /// <summary>
@@ -182,6 +207,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             catch { /* ignore */ }
 
             _solidRectBatch.BeginSession(enableCommandListReuse: true, pw, ph);
+            ApplyCommandListSessionState();
         }
 
         /// <summary>Command-list cache stats for diagnostics (simple solid-rect sessions only).</summary>
@@ -206,7 +232,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
             // Defensive: a reused context must not carry clip/layer state across frames.
             if (_clipStack.Count != 0 || _layerPushed.Count != 0 || _softOpacityDepth != 0
-                || _standaloneSoftOpacity is not null
                 || _opacityMaskBrushes.Count != 0 || _bitmapBlendModeStack.Count != 0
                 || _renderOptionsStack.Count != 0 || _textOptionsStack.Count != 0)
             {
@@ -231,7 +256,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         private void OpenSession()
         {
-            _sessionOpen = true;
+            // Reset per-session counters / batches first; only claim _sessionOpen after BeginDraw
+            // succeeds so a failed open never leaves the context permanently "open".
             _softPathHits = 0;
             _softPathMisses = 0;
             _layerPushes = 0;
@@ -256,23 +282,63 @@ namespace MIR.Direct2D1ForAvalonia.Media
             // Composition intermediates often allocate a new DrawingContextImpl per dirty paint;
             // device-level CL still hits across those instances.
             _solidRectBatch.BeginSession(enableCommandListReuse: true, pw, ph);
-            DrawingContextCallStats.OnSessionOpen(_diagnosticTargetName);
+
+            ID2D1Image? capturedTarget = null;
+            var beginDrawSucceeded = false;
             try
             {
-                _sessionTargetImage = _deviceContext.Target;
+                // Capture the target image for command-list recording in EndSession. Only do this
+                // for real GPU device contexts (not WIC bitmap RTs).
+                if (!_ownsDeviceContext)
+                {
+                    try
+                    {
+                        capturedTarget = _deviceContext.Target;
+                    }
+                    catch
+                    {
+                        capturedTarget = null;
+                    }
+                }
+
+                _deviceContext.BeginDraw();
+                beginDrawSucceeded = true;
+
+                // Reset world transform so a reused context never inherits the previous frame's matrix.
+                if (_targetTransform.HasValue || _postTransform.HasValue)
+                    ApplyTransform();
+                else
+                    _deviceContext.Transform = Matrix3x2.Identity;
+
+                // Restore default antialias / render options on the native DC. ReopenSession clears
+                // the managed _renderOptions field but without this the previous frame's EdgeMode
+                // (e.g. Aliased) would stick on the DC while the CL key assumes defaults.
+                ApplyRenderOptions(_renderOptions);
+
+                _sessionTargetImage = capturedTarget;
+                capturedTarget = null;
+                _sessionOpen = true;
+
+                // Baseline drawing state is part of the CL identity (effective transform / AA / blend).
+                ApplyCommandListSessionState();
+                DrawingContextCallStats.OnSessionOpen(_diagnosticTargetName);
             }
             catch
             {
+                if (beginDrawSucceeded)
+                {
+                    try { _deviceContext.EndDraw(); }
+                    catch { /* best-effort rollback */ }
+                }
+
+                _sessionTargetImage?.Dispose();
+                capturedTarget?.Dispose();
                 _sessionTargetImage = null;
+                _sessionOpen = false;
+                // Abandon the half-armed solid-rect session so the next open starts clean.
+                _solidRectBatch.BeginSession(enableCommandListReuse: false, 0, 0);
+                throw;
             }
-
-            _deviceContext.BeginDraw();
-
-            // Reset world transform so a reused context never inherits the previous frame's matrix.
-            if (_targetTransform.HasValue || _postTransform.HasValue)
-                ApplyTransform();
-            else
-                _deviceContext.Transform = Matrix3x2.Identity;
         }
 
         /// <summary>
@@ -352,8 +418,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 _deviceContext, _ellipseStrokeColor, _ellipseStrokeOpacity);
             if (brush.PlatformBrush is not null)
             {
-                // GeometryGroup only when enough ellipses amortize COM setup (Mixed has 5).
-                if (_ellipseStrokeBatch.Count >= 6)
+                // GeometryGroup when enough ellipses amortize COM setup. MixedScene has 5.
+                if (_ellipseStrokeBatch.Count >= 5)
                 {
                     var factory = Direct2D1Platform.Direct2D1Factory;
                     var geos = new ID2D1Geometry[_ellipseStrokeBatch.Count];
@@ -402,10 +468,20 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 if (value == _transform)
                     return;
 
-                FlushPrimitiveBatch();
+                // Mid-session transform changes force a flush; empty sessions stay CL-eligible
+                // but replace the transform fingerprint in the content hash.
+                if (_solidRectBatch.HasPendingOps
+                    || _solidRectBatch.HasDeferredStrokes
+                    || _lineBatchActive
+                    || _ellipseStrokeBatchActive)
+                {
+                    FlushPrimitiveBatch();
+                }
+
                 FlushDeferredClip();
                 _transform = value;
                 ApplyTransform();
+                ApplyCommandListSessionState();
             }
         }
 
@@ -415,9 +491,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
             set
             {
                 // AA / blend changes must not apply mid-batch. Empty sessions stay CL-eligible
-                // (Avalonia often sets options before the first primitive).
-                if (_solidRectBatch.HasDeferredStrokes
-                    || _solidRectBatch.IsDeferredSimpleSession
+                // (Avalonia often sets options before the first primitive) but must still replace
+                // the state fingerprint in the command-list content hash.
+                if (_solidRectBatch.HasPendingOps
+                    || _solidRectBatch.HasDeferredStrokes
                     || _lineBatchActive
                     || _ellipseStrokeBatchActive)
                 {
@@ -426,7 +503,35 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
                 _renderOptions = value;
                 ApplyRenderOptions(value);
+                ApplyCommandListSessionState();
             }
+        }
+
+        /// <summary>
+        /// Fingerprints the <em>effective</em> world transform (user × post × target) plus
+        /// antialias/blend into the solid-rect command-list key so a list recorded under one
+        /// drawing state is never replayed under another (including composition offset changes).
+        /// </summary>
+        private void ApplyCommandListSessionState()
+        {
+            _solidRectBatch.SetSessionState(
+                GetEffectiveTransform(),
+                (int)_renderOptions.EdgeMode,
+                (int)_renderOptions.BitmapBlendingMode);
+        }
+
+        /// <summary>
+        /// The matrix actually applied to the D2D device context: user transform, optional DPI
+        /// post-scale, and optional composition target offset.
+        /// </summary>
+        private Matrix GetEffectiveTransform()
+        {
+            var transform = _transform;
+            if (_postTransform.HasValue)
+                transform *= _postTransform.Value;
+            if (_targetTransform.HasValue)
+                transform *= _targetTransform.Value;
+            return transform;
         }
 
         public TextOptions TextOptions
@@ -460,7 +565,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 ReleaseClipGeometry(_clipStack.Pop());
             }
             _softOpacityDepth = 0;
-            _standaloneSoftOpacity = null;
 
             // Balance any unmatched PushLayer before EndDraw. D2D owns the layer resources when
             // PushLayer is called with a null layer, so there is nothing for us to dispose.
@@ -486,11 +590,15 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 FlushEllipseStrokeBatch();
                 _solidRectBatch.EndSession(_deviceContext, _deviceResources, _sessionTargetImage);
 
-                Direct2D1FrameProfiler.MarkEndDrawStart(
-                    _softPathHits, _softPathMisses, _layerPushes, _deferredClipFlushes,
-                    _pushClips, _pushOpacities, _drawRectangles);
+                if (_isPrimarySurface)
+                {
+                    Direct2D1FrameProfiler.MarkEndDrawStart(
+                        _softPathHits, _softPathMisses, _layerPushes, _deferredClipFlushes,
+                        _pushClips, _pushOpacities, _drawRectangles);
+                }
                 _deviceContext.EndDraw().CheckError();
-                Direct2D1FrameProfiler.MarkEndDrawDone();
+                if (_isPrimarySurface)
+                    Direct2D1FrameProfiler.MarkEndDrawDone();
                 if (Direct2D1Diagnostics.IsEnabled)
                     Direct2D1Diagnostics.Write($"drawing-context-dispose enddraw target={_diagnosticTargetName}");
 
@@ -509,6 +617,13 @@ namespace MIR.Direct2D1ForAvalonia.Media
             {
                 if (Direct2D1Diagnostics.IsEnabled)
                     Direct2D1Diagnostics.Write($"drawing-context-dispose recreate-target target={_diagnosticTargetName} hresult=0x{ex.HResult:X8}");
+                // Drop the device-scoped cache so stale resources from the dead device are not
+                // reused against a recreated device.
+                if (_deviceContext.Device is { } lostDevice)
+                {
+                    D2DDeviceResourceCache.InvalidateForDevice(lostDevice);
+                    lostDevice.Dispose();
+                }
                 throw new RenderTargetCorruptedException(ex);
             }
             catch (Exception ex)
@@ -519,56 +634,100 @@ namespace MIR.Direct2D1ForAvalonia.Media
             }
             finally
             {
+                var cleanupCallback = _cleanupCallback;
                 try
                 {
-                    _cleanupCallback?.Invoke();
-                    if (Direct2D1Diagnostics.IsEnabled)
-                        Direct2D1Diagnostics.Write($"drawing-context-dispose cleanup target={_diagnosticTargetName}");
+                    try
+                    {
+                        // Drain any opacity-mask brushes left pushed by a render that aborted before
+                        // matching pops. Layer resources are owned by Direct2D when PushLayer is
+                        // called with a null layer, and unmatched pushes are popped above.
+                        foreach (var maskBrush in _opacityMaskBrushes)
+                        {
+                            maskBrush?.Dispose();
+                        }
+                        _opacityMaskBrushes.Clear();
+
+                        // Solid brushes / stroke styles are owned by D2DDeviceResourceCache and must
+                        // not be disposed with the per-frame drawing context.
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            // Release the per-session target image RCW (AddRef'd by dc.Target getter).
+                            // EndSession has already consumed it for command-list recording.
+                            _sessionTargetImage?.Dispose();
+                        }
+                        finally
+                        {
+                            _sessionTargetImage = null;
+
+                            // Detach callbacks and mark the session closed before host cleanup.
+                            // External targets may release this retained context from cleanup.
+                            _sessionOpen = false;
+                            _finishedCallback = null;
+                            _cleanupCallback = null;
+
+                            // Owned QI'd device contexts (WIC RT → ID2D1DeviceContext) must survive
+                            // across ReopenSession when the host pools this instance. One-shot contexts
+                            // release on session end. Final teardown of a retained instance is via
+                            // ReleaseRetainedNativeResources (host Dispose).
+                            if (!_retainAcrossSessions)
+                                ReleaseNativeResources();
+                        }
+                    }
                 }
                 finally
                 {
-                    // Drain any opacity-mask brushes left pushed by a render that aborted before
-                    // matching pops. Layer resources are owned by Direct2D when PushLayer is
-                    // called with a null layer, and unmatched pushes are popped above.
-                    foreach (var maskBrush in _opacityMaskBrushes)
-                    {
-                        maskBrush?.Dispose();
-                    }
-                    _opacityMaskBrushes.Clear();
-
-                    // Solid brushes / stroke styles are owned by D2DDeviceResourceCache and must
-                    // not be disposed with the per-frame drawing context.
-
-                    // Mark the session closed so the instance can be reopened.
-                    _sessionOpen = false;
-                    _finishedCallback = null;
-                    _cleanupCallback = null;
-
-                    // Owned QI'd device contexts (WIC RT → ID2D1DeviceContext) must survive
-                    // across ReopenSession. One-shot contexts still release on session end.
-                    if (_ownsDeviceContext && !_retainAcrossSessions)
-                    {
-                        _deviceContext.Dispose();
-                    }
+                    cleanupCallback?.Invoke();
+                    if (Direct2D1Diagnostics.IsEnabled)
+                        Direct2D1Diagnostics.Write($"drawing-context-dispose cleanup target={_diagnosticTargetName}");
                 }
             }
         }
 
+        /// <summary>
+        /// Releases a QI'd device context retained across sessions and the device-cache lease.
+        /// Call from the host render-target's Dispose when the pooled instance is discarded.
+        /// </summary>
+        internal void ReleaseRetainedNativeResources()
+        {
+            if (_sessionOpen)
+                throw new InvalidOperationException("Cannot release native resources while a session is open.");
+
+            ReleaseNativeResources();
+        }
+
+        private void ReleaseNativeResources()
+        {
+            if (_nativeResourcesReleased)
+                return;
+
+            _nativeResourcesReleased = true;
+            try
+            {
+                if (_ownsDeviceContext)
+                    _deviceContext.Dispose();
+            }
+            finally
+            {
+                ReleaseDeviceCacheLease();
+            }
+        }
+
+        private void ReleaseDeviceCacheLease()
+        {
+            if (!_deviceCacheLeased)
+                return;
+
+            _deviceCacheLeased = false;
+            _deviceResources.ReleaseLease();
+        }
+
         private void ApplyTransform()
         {
-            var transform = _transform;
-
-            if (_postTransform.HasValue)
-            {
-                transform *= _postTransform.Value;
-            }
-
-            if (_targetTransform.HasValue)
-            {
-                transform *= _targetTransform.Value;
-            }
-
-            _deviceContext.Transform = transform.ToDirect2D();
+            _deviceContext.Transform = GetEffectiveTransform().ToDirect2D();
         }
 
         /// <summary>
@@ -580,6 +739,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="destRect">The rect in the output to draw to.</param>
         public void DrawBitmap(IBitmapImpl source, double opacity, Rect sourceRect, Rect destRect)
         {
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             if (EffectiveBitmapBlendingMode == BitmapBlendingMode.Destination)
                 return;
@@ -590,19 +750,42 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 var compositeMode = GetCompositeMode(EffectiveBitmapBlendingMode);
 
                 // Vortice 3.8.3 does not expose the ID2D1DeviceContext::DrawBitmap overload
-                // that takes a composite mode. The default SourceOver path uses DrawBitmap
-                // directly (fast); any other composite mode routes through DrawImage, which
-                // does accept a composite mode. DrawImage draws at 1:1 with a target offset,
-                // so a scaling world transform is applied when destRect differs from sourceRect.
-                if (compositeMode == CompositeMode.SourceOver)
+                // that takes a composite mode. SourceOver uses DrawBitmap directly (fast).
+                // SourceCopy (layer Blit) also uses DrawBitmap after clipping + clearing the
+                // dest rect — DrawImage(SourceCopy) on GPU CreateCompatible bitmaps has been
+                // observed to leave the D3D11 window texture fully black.
+                if (compositeMode is CompositeMode.SourceOver or CompositeMode.SourceCopy)
                 {
-                    _deviceContext.DrawBitmap(
-                        d2d.Value,
-                        destRect.ToVortice(),
-                        (float)opacity,
-                        interpolationMode,
-                        sourceRect.ToVortice(),
-                        null);
+                    if (compositeMode == CompositeMode.SourceCopy)
+                    {
+                        // SourceCopy ≡ clear dest then SourceOver, for the dest rectangle only.
+                        _deviceContext.PushAxisAlignedClip(destRect.ToVortice(), AntialiasMode.Aliased);
+                        try
+                        {
+                            _deviceContext.Clear(new Vortice.Mathematics.Color4(0, 0, 0, 0));
+                            _deviceContext.DrawBitmap(
+                                d2d.Value,
+                                destRect.ToVortice(),
+                                (float)opacity,
+                                interpolationMode,
+                                sourceRect.ToVortice(),
+                                null);
+                        }
+                        finally
+                        {
+                            _deviceContext.PopAxisAlignedClip();
+                        }
+                    }
+                    else
+                    {
+                        _deviceContext.DrawBitmap(
+                            d2d.Value,
+                            destRect.ToVortice(),
+                            (float)opacity,
+                            interpolationMode,
+                            sourceRect.ToVortice(),
+                            null);
+                    }
                 }
                 else
                 {
@@ -694,6 +877,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="destRect">The rect in the output to draw to.</param>
         public void DrawBitmap(IBitmapImpl source, IBrush opacityMask, Rect opacityMaskRect, Rect destRect)
         {
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             var interpolationMode = GetInterpolationMode(RenderOptions.BitmapInterpolationMode);
 
@@ -726,6 +910,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (_solidRectBatch.IsDeferredSimpleSession || _solidRectBatch.HasDeferredStrokes)
                 _solidRectBatch.MarkNonSimple(_deviceContext, _deviceResources);
 
+            // Prior deferred ellipse strokes must land before this line (Z-order).
+            FlushEllipseStrokeBatch();
             FlushDeferredClip();
             if (pen?.Brush is not ISolidColorBrush solid || pen.Thickness <= 0)
             {
@@ -946,9 +1132,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         {
             if (boxShadow != default)
                 return false;
-            // Soft clip / standalone soft opacity must go through the soft or full path.
-            if (_standaloneSoftOpacity is not null)
-                return false;
+            // Soft clip must go through the soft or full path.
             if (_clipStack.Count > 0)
             {
                 var top = _clipStack.Peek().State;
@@ -982,6 +1166,14 @@ namespace MIR.Direct2D1ForAvalonia.Media
             // Translucent solids (opacity or Color.A): keep immediate ordered path (no batch / no CL).
             if (!SolidRectBatch.IsFullyOpaque(solidFill) || !SolidRectBatch.IsFullyOpaque(solidStroke))
                 return false;
+
+            // Prior deferred line / ellipse strokes must be drawn before this rect fill to
+            // preserve Z-order (line then overlapping rect → rect on top).
+            if (_lineBatchActive || _ellipseStrokeBatchActive)
+            {
+                FlushLineBatch();
+                FlushEllipseStrokeBatch();
+            }
 
             FlushDeferredClip();
 
@@ -1033,6 +1225,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void DrawRegion(IBrush? brush, IPen? pen, IPlatformRenderInterfaceRegion region)
         {
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             if (region.IsEmpty)
                 return;
@@ -1077,6 +1270,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             // End solid-rect CL session; ellipse strokes can still multi-batch.
             if (_solidRectBatch.IsDeferredSimpleSession || _solidRectBatch.HasDeferredStrokes)
                 _solidRectBatch.MarkNonSimple(_deviceContext, _deviceResources);
+            // Lines issued before this ellipse must land first (Z-order).
             FlushLineBatch();
             FlushDeferredClip();
 
@@ -1087,6 +1281,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 RadiusY = (float)(rect.Height / 2)
             };
 
+            // Any fill (including opaque solid) must land after prior deferred ellipse strokes
+            // so "stroked ellipse A → filled ellipse B" keeps A under B.
+            if (brush != null)
+                FlushEllipseStrokeBatch();
+
             if (brush is ISolidColorBrush solidFill && SolidRectBatch.IsFullyOpaque(solidFill))
             {
                 var fill = _deviceResources.GetOrCreateSolidBrush(
@@ -1096,7 +1295,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
             }
             else if (brush != null)
             {
-                FlushEllipseStrokeBatch();
                 using var b = CreateBrush(brush, rect);
                 if (b.PlatformBrush != null)
                     _deviceContext.FillEllipse(ellipse, b.PlatformBrush);
@@ -1148,6 +1346,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="glyphRun">The glyph run.</param>
         public void DrawGlyphRun(IBrush? foreground, IGlyphRunImpl glyphRun)
         {
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             using (var brush = CreateBrush(foreground, glyphRun.Bounds))
             {
@@ -1213,6 +1412,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         {
             _pushClips++;
             DrawingContextCallStats.OnPushClip();
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             _clipStack.Push(ClipEntry.AxisAligned());
             _deviceContext.PushAxisAlignedClip(clip.ToVortice(), AntialiasMode.PerPrimitive);
@@ -1222,6 +1422,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
         {
             _pushClips++;
             DrawingContextCallStats.OnPushClip();
+            // Fence deferred primitives on both push sides (including the zero-radius AA path).
+            FlushPrimitiveBatch();
             FlushDeferredClip();
 
             var radiusX = Math.Max(clip.RadiiTopLeft.X,
@@ -1259,13 +1461,20 @@ namespace MIR.Direct2D1ForAvalonia.Media
             // Fast path: uniform corner radii map directly onto D2D's native rounded-rect
             // geometry. Building a path geometry with four arcs is much more expensive and is
             // unnecessary for the common Avalonia RoundedRect(rect, radius) form.
+            // Normalize radii first: D2D clamps X/Y independently, whereas Avalonia (and Skia)
+            // scale proportionally — the two diverge once a radius exceeds half of a dimension.
             if (AreRadiiUniform(roundedRect))
             {
+                var tl = roundedRect.RadiiTopLeft;
+                var tr = roundedRect.RadiiTopRight;
+                var br = roundedRect.RadiiBottomRight;
+                var bl = roundedRect.RadiiBottomLeft;
+                NormalizeRadii(roundedRect.Rect.Width, roundedRect.Rect.Height, ref tl, ref tr, ref br, ref bl);
                 var rounded = new RoundedRectangle
                 {
                     Rect = roundedRect.Rect.ToDirect2D(),
-                    RadiusX = (float)roundedRect.RadiiTopLeft.X,
-                    RadiusY = (float)roundedRect.RadiiTopLeft.Y
+                    RadiusX = (float)tl.X,
+                    RadiusY = (float)tl.Y
                 };
                 return Direct2D1Platform.Direct2D1Factory.CreateRoundedRectangleGeometry(rounded);
             }
@@ -1464,7 +1673,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 }
 
                 using var mask = CreateGeometryMask(geometry, maskBounds);
-                using var shadowEffect = CreateShadowEffect(mask.Bitmap, shadow);
+                using var maskBitmap = mask.Bitmap;
+                using var shadowEffect = CreateShadowEffect(maskBitmap, shadow);
                 using var output = shadowEffect.Output;
                 _deviceContext.DrawImage(
                     output,
@@ -1637,6 +1847,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (region is not Direct2DRegionImpl d2dRegion)
                 throw new InvalidOperationException("Region was not created by this Direct2D backend.");
 
+            FlushPrimitiveBatch();
             FlushDeferredClip();
 
             if (region.IsEmpty)
@@ -1671,6 +1882,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void PopClip()
         {
+            // Primitives issued inside this clip scope must be drawn while the clip is still
+            // active. Materialise any deferred clip first (so it is a real D2D layer/clip when
+            // the primitives draw), then flush the deferred primitive batches, then pop.
+            FlushDeferredClip();
+            FlushPrimitiveBatch();
             var entry = _clipStack.Pop();
             switch (entry.State)
             {
@@ -1706,6 +1922,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void PushLayer(Rect bounds)
         {
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             var parameters = new LayerParameters
             {
@@ -1718,7 +1935,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         void IDrawingContextImpl.PopLayer()
         {
+            // Primitives issued inside this layer must be drawn before the layer is popped.
             FlushDeferredClip();
+            FlushPrimitiveBatch();
             PopLayer();
         }
 
@@ -1739,6 +1958,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 && _clipStack.Count > 0
                 && _clipStack.Peek().State == ClipState.Deferred)
             {
+                // Fence primitives issued under the deferred clip before changing soft state.
+                FlushPrimitiveBatch();
+
                 var deferred = _clipStack.Pop();
                 var contentBounds = deferred.ContentBounds;
                 if (bounds is { } opacityBounds && opacityBounds != default(Rect))
@@ -1756,20 +1978,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 return;
             }
 
+            FlushPrimitiveBatch();
             FlushDeferredClip();
 
             if (opacity < 1)
             {
-                // Standalone soft opacity (no rounded clip): bake into solid fills / simple pens.
-                // Nested standalone or soft-merged-active cases fall through to a real layer.
-                if (_standaloneSoftOpacity is null && _softOpacityDepth == 0)
-                {
-                    _standaloneSoftOpacity = (float)opacity;
-                    return;
-                }
-
-                FlushStandaloneSoftOpacity();
-
                 if (bounds == null || bounds == default(Rect))
                 {
                     bounds = new Rect(0, 0, _renderTarget.PixelSize.Width, _renderTarget.PixelSize.Height);
@@ -1794,19 +2007,28 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void PopOpacity()
         {
-            // Standalone soft opacity closes without a D2D layer (unless flushed mid-scope).
-            if (_standaloneSoftOpacity is not null && _softOpacityDepth == 0)
-            {
-                _standaloneSoftOpacity = null;
-                return;
-            }
-
+            // Soft-merged opacity closes without a D2D layer. Restore SoftMerged → Deferred so
+            // subsequent draws under the still-active rounded clip do not keep the expired
+            // opacity, and so a later FlushDeferredClip cannot materialise an orphan layer
+            // that PopClip would fail to balance (MergedIntoOpacity assumes PopOpacity already
+            // popped the D2D layer).
             if (_softOpacityDepth > 0)
             {
+                // Primitives issued inside the soft opacity scope must be drawn before it closes.
+                FlushPrimitiveBatch();
+
+                if (_clipStack.Count > 0 && _clipStack.Peek().State == ClipState.SoftMerged)
+                {
+                    var soft = _clipStack.Pop();
+                    _clipStack.Push(ClipEntry.Deferred(soft.ClipShape, soft.ContentBounds));
+                }
+
                 _softOpacityDepth--;
                 return;
             }
 
+            // Real opacity layer (or soft-merged that was materialised mid-scope to MergedIntoOpacity).
+            FlushPrimitiveBatch();
             PopLayer();
         }
 
@@ -1858,9 +2080,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// </summary>
         private void FlushDeferredClip()
         {
-            // Standalone soft opacity cannot stay deferred across a hard clip/layer boundary.
-            FlushStandaloneSoftOpacity();
-
             if (_clipStack.Count == 0)
                 return;
 
@@ -1916,26 +2135,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
         }
 
         /// <summary>
-        /// Converts a deferred standalone soft opacity into a real D2D opacity layer so subsequent
-        /// incompatible draws (or stack changes) remain correct. PopOpacity will PopLayer.
-        /// </summary>
-        private void FlushStandaloneSoftOpacity()
-        {
-            if (_standaloneSoftOpacity is not float opacity)
-                return;
-
-            _standaloneSoftOpacity = null;
-            var bounds = new Rect(0, 0, _renderTarget.PixelSize.Width, _renderTarget.PixelSize.Height);
-            var parameters = new LayerParameters
-            {
-                MaskTransform = Matrix3x2.Identity,
-                Opacity = opacity,
-                ContentBounds = bounds.ToDirect2D()
-            };
-            PushDirect2DLayer(parameters);
-        }
-
-        /// <summary>
         /// Soft clip / soft opacity: bake solid fills and simple solid pens without a D2D layer.
         /// Uniform-radius shapes use native Fill/DrawRoundedRectangle (no geometry COM object).
         /// </summary>
@@ -1954,10 +2153,19 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
             var hasSoftClip = _clipStack.Count > 0
                 && _clipStack.Peek().State is ClipState.SoftMerged or ClipState.Deferred;
-            var hasStandaloneSoft = _standaloneSoftOpacity is not null;
 
-            if (!hasSoftClip && !hasStandaloneSoft)
+            if (!hasSoftClip)
                 return false;
+
+            // Soft-merged opacity bakes opacity per-primitive, which breaks group transparency
+            // (two overlapping opaque rects at 0.5 → 0.75, not 0.5). Fall back to a real D2D
+            // opacity layer so the group is composited correctly.
+            if (_clipStack.Peek().State == ClipState.SoftMerged && _clipStack.Peek().Opacity < 1f)
+            {
+                _softPathMisses++;
+                DrawingContextCallStats.OnSoftMiss();
+                return false;
+            }
 
             // Soft path: solid fills and/or simple solid pens only.
             ISolidColorBrush? solidFill = null;
@@ -2011,10 +2219,14 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     return false;
                 }
 
-                // fill == clip → paint clip shape for corner-AA parity with a geometric mask.
+                // fill == clip (including radii) → paint clip shape for corner-AA parity with a
+                // geometric mask. If the radii differ, painting the clip shape would fill corners
+                // that belong to the clip but not the fill, so fall through to the interior check.
                 // fill fully interior to rounded clip → paint fill shape (multi-draw under one clip).
                 // otherwise fall through to real layer (partial intersection not approximated).
-                if (solidFill is not null && pen is null && RectEquals(shape, clipShape.Rect))
+                if (solidFill is not null && pen is null
+                    && RectEquals(shape, clipShape.Rect)
+                    && RadiiMatch(rrect, clipShape))
                     paintClipShape = true;
                 else if (!IsFullyInteriorToRoundedClip(shape, halfStroke, clipShape))
                 {
@@ -2024,8 +2236,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 }
             }
 
-            var standalone = _standaloneSoftOpacity ?? 1f;
-            var bakedOpacity = clipOpacity * standalone;
+            var bakedOpacity = clipOpacity;
             // Soft draws leave the simple-rect session; flush any deferred strokes first.
             FlushPrimitiveBatch();
             _softPathHits++;
@@ -2174,6 +2385,20 @@ namespace MIR.Direct2D1ForAvalonia.Media
                && Math.Abs(a.Height - b.Height) < 0.01;
 
         /// <summary>
+        /// True when all eight radius components of two rounded rects match (with tolerance).
+        /// Used to decide whether painting the clip shape is equivalent to painting the fill shape.
+        /// </summary>
+        private static bool RadiiMatch(RoundedRect a, RoundedRect b)
+            => AreClose(a.RadiiTopLeft.X, b.RadiiTopLeft.X)
+               && AreClose(a.RadiiTopLeft.Y, b.RadiiTopLeft.Y)
+               && AreClose(a.RadiiTopRight.X, b.RadiiTopRight.X)
+               && AreClose(a.RadiiTopRight.Y, b.RadiiTopRight.Y)
+               && AreClose(a.RadiiBottomRight.X, b.RadiiBottomRight.X)
+               && AreClose(a.RadiiBottomRight.Y, b.RadiiBottomRight.Y)
+               && AreClose(a.RadiiBottomLeft.X, b.RadiiBottomLeft.X)
+               && AreClose(a.RadiiBottomLeft.Y, b.RadiiBottomLeft.Y);
+
+        /// <summary>
         /// True when <paramref name="shape"/> (optionally expanded by stroke) lies entirely inside
         /// the axis-aligned inset of the rounded clip, so corner AA of the clip never affects the draw.
         /// </summary>
@@ -2209,6 +2434,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         private static void ReleaseClipGeometry(in ClipEntry entry)
         {
+            // All rounded-clip geometries are cache-owned (AcquireRoundedClipGeometry always
+            // returns ownsGeometry=false). Nothing to dispose here — the cache LRU manages lifetime.
             if (entry.OwnsGeometry)
                 entry.Geometry?.Dispose();
         }
@@ -2216,7 +2443,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <summary>
         /// Returns a rounded-rect geometry suitable as a clip mask. Prefer a process-wide cache so
         /// repeated clips (and multi-iteration benchmarks / UI frames) reuse the same ID2D1Geometry
-        /// instead of rebuilding path/native rounded geometries every time.
+        /// instead of rebuilding path/native rounded geometries every time. All returned geometries
+        /// are cache-owned (ownsGeometry is always false). The LRU bounds managed cache identity;
+        /// native release of evicted geometries is deferred until their RCWs are collected.
         /// </summary>
         private static ID2D1Geometry AcquireRoundedClipGeometry(RoundedRect roundedRect, out bool ownsGeometry)
         {
@@ -2225,21 +2454,42 @@ namespace MIR.Direct2D1ForAvalonia.Media
             {
                 if (s_roundedClipGeometryCache.TryGetValue(key, out var cached))
                 {
+                    TouchRoundedClipGeometry(key);
                     ownsGeometry = false;
                     return cached;
                 }
 
                 var created = CreateRoundedRectGeometry(roundedRect);
-                if (s_roundedClipGeometryCache.Count < MaxRoundedClipGeometryCacheSize)
+
+                // Evict oldest if at cap. Do NOT Dispose here: clip entries / pushed layers may
+                // still hold the cache-owned RCW for the rest of the session. Dropping the dict
+                // entry only ends cache identity; the COM object lives until the last managed
+                // reference (clip stack) is released and the RCW is collected.
+                while (s_roundedClipGeometryCache.Count >= MaxRoundedClipGeometryCacheSize
+                       && s_roundedClipGeometryLru.Count > 0)
                 {
-                    s_roundedClipGeometryCache[key] = created;
-                    ownsGeometry = false;
-                    return created;
+                    var oldestKey = s_roundedClipGeometryLru.First!.Value;
+                    s_roundedClipGeometryCache.Remove(oldestKey);
+                    if (s_roundedClipGeometryLruNodes.TryGetValue(oldestKey, out var node))
+                    {
+                        s_roundedClipGeometryLru.Remove(node);
+                        s_roundedClipGeometryLruNodes.Remove(oldestKey);
+                    }
                 }
 
-                // Cache full: caller owns and must dispose.
-                ownsGeometry = true;
+                s_roundedClipGeometryCache[key] = created;
+                s_roundedClipGeometryLruNodes[key] = s_roundedClipGeometryLru.AddLast(key);
+                ownsGeometry = false;
                 return created;
+            }
+        }
+
+        private static void TouchRoundedClipGeometry(RoundedRectGeometryKey key)
+        {
+            if (s_roundedClipGeometryLruNodes.TryGetValue(key, out var node))
+            {
+                s_roundedClipGeometryLru.Remove(node);
+                s_roundedClipGeometryLruNodes[key] = s_roundedClipGeometryLru.AddLast(key);
             }
         }
 
@@ -2297,9 +2547,13 @@ namespace MIR.Direct2D1ForAvalonia.Media
         }
 
         // Process-wide cache of rounded clip geometries. Keys are quantized to avoid float drift.
-        // Entries are never disposed while the process lives (bounded by MaxRoundedClipGeometryCacheSize).
+        // LRU-evicted at MaxRoundedClipGeometryCacheSize to bound managed cache identity. Evicted
+        // RCWs are not disposed while borrowers may still reference them, so native release is
+        // deferred to GC. All acquired geometries are cache-owned; callers never dispose them.
         private static readonly object s_roundedClipGeometryCacheLock = new();
         private static readonly Dictionary<RoundedRectGeometryKey, ID2D1Geometry> s_roundedClipGeometryCache = new();
+        private static readonly LinkedList<RoundedRectGeometryKey> s_roundedClipGeometryLru = new();
+        private static readonly Dictionary<RoundedRectGeometryKey, LinkedListNode<RoundedRectGeometryKey>> s_roundedClipGeometryLruNodes = new();
         private const int MaxRoundedClipGeometryCacheSize = 512;
 
         /// <summary>
@@ -2381,9 +2635,12 @@ namespace MIR.Direct2D1ForAvalonia.Media
                                    null,
                                    CompatibleRenderTargetOptions.None))
                         {
-                            using (var ctx = new RenderTarget(intermediate).CreateDrawingContext(true))
+                            using (var ctx = new DrawingContextImpl(
+                                       layerFactory: null,
+                                       renderTarget: intermediate,
+                                       useScaledDrawing: true))
                             {
-                                intermediate.Clear(null);
+                                ctx.Clear(Colors.Transparent);
 
                                 if (sceneBrush?.TileMode == TileMode.None)
                                 {
@@ -2393,11 +2650,33 @@ namespace MIR.Direct2D1ForAvalonia.Media
                                 sceneBrushContent.Render(ctx, transform);
                             }
 
-                            return new ImageBrushImpl(
-                                sceneBrushContent.Brush,
-                                _deviceContext,
-                                new D2DBitmapImpl(intermediate.Bitmap.QueryInterface<ID2D1Bitmap1>()),
-                                destinationRect);
+                            using var intermediateBitmap = intermediate.Bitmap;
+                            var bitmap1 = intermediateBitmap.QueryInterface<ID2D1Bitmap1>();
+                            D2DBitmapImpl bitmapImpl;
+                            try
+                            {
+                                bitmapImpl = new D2DBitmapImpl(bitmap1);
+                            }
+                            catch
+                            {
+                                bitmap1.Dispose();
+                                throw;
+                            }
+
+                            try
+                            {
+                                return new ImageBrushImpl(
+                                    sceneBrushContent.Brush,
+                                    _deviceContext,
+                                    bitmapImpl,
+                                    destinationRect,
+                                    ownsBitmap: true);
+                            }
+                            catch
+                            {
+                                bitmapImpl.Dispose();
+                                throw;
+                            }
                         }
 
                     }
@@ -2432,6 +2711,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void PushGeometryClip(IGeometryImpl clip)
         {
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             var parameters = new LayerParameters
             {
@@ -2442,11 +2722,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 MaskAntialiasMode = AntialiasMode.PerPrimitive
             };
             PushDirect2DLayer(parameters);
-
         }
 
         public void PopGeometryClip()
         {
+            FlushPrimitiveBatch();
             PopLayer();
         }
 
@@ -2472,6 +2752,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void PushOpacityMask(IBrush mask, Rect bounds)
         {
+            FlushPrimitiveBatch();
             FlushDeferredClip();
             var opacityBrush = CreateBrush(mask, bounds);
             var parameters = new LayerParameters
@@ -2498,6 +2779,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         {
             try
             {
+                FlushPrimitiveBatch();
                 PopLayer();
             }
             finally

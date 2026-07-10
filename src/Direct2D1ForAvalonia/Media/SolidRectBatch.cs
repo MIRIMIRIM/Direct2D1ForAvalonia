@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using Avalonia;
 using Avalonia.Media;
 using Vortice.Direct2D1;
@@ -32,6 +33,8 @@ internal sealed class SolidRectBatch
     private readonly List<SimpleRectOp> _ops = new(128);
 
     private long _sessionHash;
+    /// <summary>Drawing-state fingerprint (transform / AA / blend), replaced on each state change.</summary>
+    private long _stateHash;
     private bool _sessionOnlySimple = true;
     private bool _deferSimpleSession;
     private bool _active;
@@ -42,6 +45,9 @@ internal sealed class SolidRectBatch
     public bool IsDeferredSimpleSession => _deferSimpleSession && _sessionOnlySimple;
 
     public bool HasDeferredStrokes => _strokes.Count > 0;
+
+    /// <summary>True when any simple rect ops have been recorded in the current session.</summary>
+    public bool HasPendingOps => _ops.Count > 0;
 
     /// <summary>Command-list cache hits this process (for diagnostics / benches).</summary>
     public int CommandListHits { get; private set; }
@@ -68,6 +74,7 @@ internal sealed class SolidRectBatch
         _pixelW = pixelWidth;
         _pixelH = pixelHeight;
         _sessionHash = unchecked((long)14695981039346656037);
+        _stateHash = unchecked((long)14695981039346656037);
         // Target size is part of the content fingerprint so a resize never replays a wrong CL.
         unchecked
         {
@@ -84,12 +91,30 @@ internal sealed class SolidRectBatch
         _active = true;
     }
 
+    /// <summary>Content hash combining ops + drawing state for command-list identity.</summary>
+    private long ContentHash
+    {
+        get
+        {
+            unchecked
+            {
+                // Fold state into ops hash without mutating either field.
+                var h = _sessionHash;
+                h ^= _stateHash;
+                h *= 1099511628211;
+                return h;
+            }
+        }
+    }
+
     public void MarkNonSimple(ID2D1DeviceContext dc, D2DDeviceResourceCache resources)
     {
         if (!_active)
             return;
 
-        // Empty session (e.g. RenderOptions set before any draw): keep simple/CL eligibility.
+        // Empty session (e.g. RenderOptions / Transform set before any draw): keep simple/CL
+        // eligibility. Callers must MixSessionState when those values change so the CL key
+        // still fingerprints drawing state.
         if (_ops.Count == 0 && _strokes.Count == 0)
             return;
 
@@ -107,6 +132,40 @@ internal sealed class SolidRectBatch
         // Do not wipe the device-scoped CL cache — other visuals may still use those entries.
         _deferSimpleSession = false;
         _sessionOnlySimple = false;
+    }
+
+    /// <summary>
+    /// Replaces the drawing-session state fingerprint (world transform, antialias, blend) so a
+    /// command list recorded under one state is never replayed under another. Safe to call on
+    /// empty sessions without killing CL deferral; replaces rather than accumulates so repeated
+    /// option changes before the first draw keep only the latest state.
+    /// </summary>
+    public void SetSessionState(in Matrix transform, int edgeMode, int bitmapBlendingMode)
+    {
+        if (!_active)
+            return;
+
+        unchecked
+        {
+            var h = (long)14695981039346656037;
+            h ^= transform.M11.GetHashCode();
+            h *= 1099511628211;
+            h ^= transform.M12.GetHashCode();
+            h *= 1099511628211;
+            h ^= transform.M21.GetHashCode();
+            h *= 1099511628211;
+            h ^= transform.M22.GetHashCode();
+            h *= 1099511628211;
+            h ^= transform.M31.GetHashCode();
+            h *= 1099511628211;
+            h ^= transform.M32.GetHashCode();
+            h *= 1099511628211;
+            h ^= edgeMode;
+            h *= 1099511628211;
+            h ^= bitmapBlendingMode;
+            h *= 1099511628211;
+            _stateHash = h;
+        }
     }
 
     /// <summary>
@@ -228,12 +287,20 @@ internal sealed class SolidRectBatch
             if (_deferSimpleSession && _sessionOnlySimple && _ops.Count > 0)
             {
                 DebugDeferredEnds++;
-                if (resources.TryGetCommandList(_sessionHash, _pixelW, _pixelH, out var cached))
+                if (resources.TryGetCommandList(ContentHash, _pixelW, _pixelH, out var cached))
                 {
                     // Steady-state: one DrawImage replaces N fills + strokes (composition intermediate
                     // dirty repaint when content hash matches a prior paint on this device).
+                    // TryGet returns a QI'd RCW the caller must dispose (cache may dispose its copy).
                     CommandListHits++;
-                    dc.DrawImage(cached);
+                    try
+                    {
+                        dc.DrawImage(cached);
+                    }
+                    finally
+                    {
+                        cached.Dispose();
+                    }
                     return;
                 }
 
@@ -347,10 +414,17 @@ internal sealed class SolidRectBatch
         if (_ops.Count == 0)
             return false;
 
+        // Prefer the caller-captured session target (GPU path). Fall back to dc.Target for WIC
+        // RTs; that getter returns a new RCW we must release.
         ID2D1Image? previousTarget = sessionTarget;
+        var ownsPreviousTarget = false;
         if (previousTarget is null)
         {
-            try { previousTarget = dc.Target; }
+            try
+            {
+                previousTarget = dc.Target;
+                ownsPreviousTarget = previousTarget is not null;
+            }
             catch { return false; }
         }
 
@@ -374,7 +448,7 @@ internal sealed class SolidRectBatch
             cl.Close();
 
             dc.Target = previousTarget;
-            resources.StoreCommandList(_sessionHash, _pixelW, _pixelH, cl);
+            resources.StoreCommandList(ContentHash, _pixelW, _pixelH, cl);
             cl = null;
             return true;
         }
@@ -384,6 +458,13 @@ internal sealed class SolidRectBatch
             try { dc.Target = previousTarget; } catch { /* ignore */ }
             cl?.Dispose();
             return false;
+        }
+        finally
+        {
+            // Only dispose the RCW we obtained via dc.Target; the session-captured image is
+            // owned by DrawingContextImpl and released at session end.
+            if (ownsPreviousTarget)
+                previousTarget.Dispose();
         }
     }
 
@@ -486,23 +567,36 @@ internal sealed class SolidRectBatch
             _sessionHash *= 1099511628211;
             _sessionHash ^= op.Rect.Height.GetHashCode();
             _sessionHash *= 1099511628211;
+
+            _sessionHash ^= op.HasFill ? 1 : 0;
+            _sessionHash *= 1099511628211;
             if (op.HasFill)
             {
                 _sessionHash ^= op.FillColor.ToUInt32();
                 _sessionHash *= 1099511628211;
+                _sessionHash ^= BitConverter.SingleToInt32Bits((float)op.FillOpacity);
+                _sessionHash *= 1099511628211;
             }
 
+            _sessionHash ^= op.HasStroke ? 1 : 0;
+            _sessionHash *= 1099511628211;
             if (op.HasStroke)
             {
                 _sessionHash ^= op.StrokeColor.ToUInt32();
                 _sessionHash *= 1099511628211;
+                _sessionHash ^= BitConverter.SingleToInt32Bits((float)op.StrokeOpacity);
+                _sessionHash *= 1099511628211;
                 _sessionHash ^= BitConverter.SingleToInt32Bits(op.StrokeThickness);
+                _sessionHash *= 1099511628211;
+                _sessionHash ^= op.StrokeStyle is null ? 0 : RuntimeHelpers.GetHashCode(op.StrokeStyle);
                 _sessionHash *= 1099511628211;
             }
 
             _sessionHash ^= op.IsRounded ? 1 : 0;
             _sessionHash *= 1099511628211;
             _sessionHash ^= BitConverter.SingleToInt32Bits(op.RadiusX);
+            _sessionHash *= 1099511628211;
+            _sessionHash ^= BitConverter.SingleToInt32Bits(op.RadiusY);
             _sessionHash *= 1099511628211;
         }
     }
@@ -518,7 +612,7 @@ internal sealed class SolidRectBatch
     /// </summary>
     internal static bool IsFullyOpaque(ISolidColorBrush? brush)
         => brush is null
-           || (brush.Opacity >= 0.999 && brush.Color.A >= 255);
+           || (brush.Opacity >= 1.0 && brush.Color.A == 255);
 
     private readonly struct StrokeEntry
     {
@@ -555,7 +649,7 @@ internal sealed class SolidRectBatch
         public ID2D1StrokeStyle? Style { get; }
     }
 
-    private readonly struct SimpleRectOp
+    internal readonly struct SimpleRectOp
     {
         public SimpleRectOp(
             Rect rect,
@@ -597,5 +691,6 @@ internal sealed class SolidRectBatch
         public double StrokeOpacity { get; }
         public float StrokeThickness { get; }
         public ID2D1StrokeStyle? StrokeStyle { get; }
+
     }
 }

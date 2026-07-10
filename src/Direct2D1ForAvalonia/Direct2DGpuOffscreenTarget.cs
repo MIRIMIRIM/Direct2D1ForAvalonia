@@ -106,14 +106,19 @@ namespace MIR.Direct2D1ForAvalonia
         /// is reused across frames to avoid per-frame stack/cache reallocations.
         /// </summary>
         /// <param name="forceNewInstance">
-        /// When true, allocates a fresh <see cref="DrawingContextImpl"/> (composition-like:
-        /// new intermediate host each paint). Device-scoped command lists should still hit.
+        /// When true, replaces only the managed <see cref="DrawingContextImpl"/> wrapper around
+        /// the same native device context. Use <see cref="CreateCompatibleDrawingContext"/> when
+        /// a fresh compatible render target/native context is required.
         /// </param>
         public IDrawingContextImpl CreateDrawingContext(bool forceNewInstance = false)
         {
             EnsureNotDisposed();
-            if (forceNewInstance)
+            if (forceNewInstance && _reusableContext is not null)
+            {
+                // Borrowed DC is not owned by DrawingContextImpl; still clear the managed pool.
+                _reusableContext.ReleaseRetainedNativeResources();
                 _reusableContext = null;
+            }
 
             if (_reusableContext is null)
             {
@@ -126,6 +131,37 @@ namespace MIR.Direct2D1ForAvalonia
             }
 
             return _reusableContext;
+        }
+
+        /// <summary>
+        /// Creates a one-shot drawing context on a fresh compatible bitmap render target.
+        /// The compatible target QIs to its own <see cref="ID2D1DeviceContext"/>, while sharing
+        /// the parent native D2D device and therefore the device resource cache.
+        /// </summary>
+        public IDrawingContextImpl CreateCompatibleDrawingContext()
+        {
+            EnsureNotDisposed();
+
+            var dipSize = PixelSize.ToSizeWithDpi(_dpi);
+            var compatible = _deviceContext.CreateCompatibleRenderTarget(
+                new Vortice.Mathematics.Size((float)dipSize.Width, (float)dipSize.Height),
+                null,
+                null,
+                CompatibleRenderTargetOptions.None);
+
+            try
+            {
+                return new DrawingContextImpl(
+                    this,
+                    compatible,
+                    useScaledDrawing: false,
+                    cleanupCallback: compatible.Dispose);
+            }
+            catch
+            {
+                compatible.Dispose();
+                throw;
+            }
         }
 
         /// <summary>
@@ -153,13 +189,28 @@ namespace MIR.Direct2D1ForAvalonia
         {
             EnsureNotDisposed();
             var cache = D2DDeviceResourceCache.For(_deviceContext);
-            return (cache.CommandListHits, cache.CommandListStores);
+            try
+            {
+                return (cache.CommandListHits, cache.CommandListStores);
+            }
+            finally
+            {
+                cache.ReleaseLease();
+            }
         }
 
         public void ResetDeviceCommandListStats()
         {
             EnsureNotDisposed();
-            D2DDeviceResourceCache.For(_deviceContext).ResetCommandListStats();
+            var cache = D2DDeviceResourceCache.For(_deviceContext);
+            try
+            {
+                cache.ResetCommandListStats();
+            }
+            finally
+            {
+                cache.ReleaseLease();
+            }
         }
 
         /// <summary>
@@ -232,8 +283,12 @@ namespace MIR.Direct2D1ForAvalonia
 
             _disposed = true;
             _deviceContext.Target = null;
-            // Drop the reusable context reference; the device context it borrows is disposed below.
-            _reusableContext = null;
+            if (_reusableContext is not null)
+            {
+                _reusableContext.ReleaseRetainedNativeResources();
+                _reusableContext = null;
+            }
+
             _staging.Dispose();
             _targetBitmap.Dispose();
             _surface.Dispose();

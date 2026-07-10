@@ -20,5 +20,16 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
             PlatformBrush?.Dispose();
         }
+
+        /// <summary>
+        /// Disposes the underlying native brush regardless of <see cref="IsCached"/>.
+        /// Used by the resource cache's LRU eviction to release the COM object when a cached
+        /// brush is evicted — <see cref="Dispose"/> is a no-op for cached brushes.
+        /// </summary>
+        internal void ForceReleaseNative()
+        {
+            PlatformBrush?.Dispose();
+            PlatformBrush = null;
+        }
     }
 }

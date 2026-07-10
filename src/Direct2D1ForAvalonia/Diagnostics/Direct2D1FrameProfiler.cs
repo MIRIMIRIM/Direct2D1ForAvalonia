@@ -29,6 +29,9 @@ namespace MIR.Direct2D1ForAvalonia.Diagnostics
         private static long s_tEndDraw;
         private static long s_tFlush;
         private static bool s_inFrame;
+        // Thread that opened the frame — marks from other threads are skipped so off-thread
+        // composition intermediates can't corrupt the window surface's phase timestamps.
+        private static int s_ownerThread;
         // Captured at EndDraw (before session reopen can zero DrawingContextImpl counters).
         private static int s_softHits;
         private static int s_softMisses;
@@ -47,6 +50,7 @@ namespace MIR.Direct2D1ForAvalonia.Diagnostics
                 IsEnabled = true;
                 s_records.Clear();
                 s_inFrame = false;
+                s_ownerThread = 0;
             }
         }
 
@@ -56,6 +60,7 @@ namespace MIR.Direct2D1ForAvalonia.Diagnostics
             {
                 IsEnabled = false;
                 s_inFrame = false;
+                s_ownerThread = 0;
             }
         }
 
@@ -65,6 +70,7 @@ namespace MIR.Direct2D1ForAvalonia.Diagnostics
             {
                 s_records.Clear();
                 s_inFrame = false;
+                s_ownerThread = 0;
             }
         }
 
@@ -73,19 +79,20 @@ namespace MIR.Direct2D1ForAvalonia.Diagnostics
             if (!IsEnabled)
                 return;
             s_t0 = Stopwatch.GetTimestamp();
+            s_ownerThread = Environment.CurrentManagedThreadId;
             s_inFrame = true;
         }
 
         public static void MarkSurfaceReady()
         {
-            if (!IsEnabled || !s_inFrame)
+            if (!IsEnabled || !s_inFrame || !IsOwnerThread)
                 return;
             s_tSurface = Stopwatch.GetTimestamp();
         }
 
         public static void MarkSetupDone()
         {
-            if (!IsEnabled || !s_inFrame)
+            if (!IsEnabled || !s_inFrame || !IsOwnerThread)
                 return;
             s_tSetup = Stopwatch.GetTimestamp();
         }
@@ -99,7 +106,7 @@ namespace MIR.Direct2D1ForAvalonia.Diagnostics
             int pushOpacities = 0,
             int drawRectangles = 0)
         {
-            if (!IsEnabled || !s_inFrame)
+            if (!IsEnabled || !s_inFrame || !IsOwnerThread)
                 return;
             s_tEndDrawStart = Stopwatch.GetTimestamp();
             s_softHits = softHits;
@@ -113,17 +120,19 @@ namespace MIR.Direct2D1ForAvalonia.Diagnostics
 
         public static void MarkEndDrawDone()
         {
-            if (!IsEnabled || !s_inFrame)
+            if (!IsEnabled || !s_inFrame || !IsOwnerThread)
                 return;
             s_tEndDraw = Stopwatch.GetTimestamp();
         }
 
         public static void MarkFlushDone()
         {
-            if (!IsEnabled || !s_inFrame)
+            if (!IsEnabled || !s_inFrame || !IsOwnerThread)
                 return;
             s_tFlush = Stopwatch.GetTimestamp();
         }
+
+        private static bool IsOwnerThread => s_ownerThread == 0 || s_ownerThread == Environment.CurrentManagedThreadId;
 
         /// <summary>
         /// Completes the frame after composition session dispose (Present hand-off).
@@ -131,7 +140,7 @@ namespace MIR.Direct2D1ForAvalonia.Diagnostics
         /// </summary>
         public static void MarkCleanupDone()
         {
-            if (!IsEnabled || !s_inFrame)
+            if (!IsEnabled || !s_inFrame || !IsOwnerThread)
                 return;
 
             var tCleanup = Stopwatch.GetTimestamp();
@@ -162,6 +171,7 @@ namespace MIR.Direct2D1ForAvalonia.Diagnostics
             }
 
             s_inFrame = false;
+            s_ownerThread = 0;
             s_t0 = s_tSurface = s_tSetup = s_tEndDrawStart = s_tEndDraw = s_tFlush = 0;
             s_softHits = s_softMisses = s_layerPushes = s_deferredFlushes = 0;
             s_pushClips = s_pushOpacities = s_drawRectangles = 0;

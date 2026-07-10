@@ -124,6 +124,7 @@ internal static class OffscreenSmoke
         VerifyJpegQuality(bitmap, options.OutputDirectory);
         RunEdgeCaseSmoke(options.OutputDirectory);
         RunDpiSmoke(options.OutputDirectory);
+        RunBatchCorrectnessSmoke(options.OutputDirectory);
         Console.WriteLine($"Offscreen smoke passed. screenshot={outputPath}");
     }
 
@@ -197,9 +198,160 @@ internal static class OffscreenSmoke
         var dpiPath = Path.Combine(outputDirectory, "offscreen-dpi192.png");
         bitmap.Save(dpiPath, PngBitmapEncoderOptions.Default);
         ScreenshotVerifier.VerifyPng(dpiPath, "offscreen high DPI");
-        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI fill", 56, 48, Colors.Lime, tolerance: 16);
-        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI background", 140, 48, Colors.White, tolerance: 16);
-        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI line", 96, 104, Colors.Black, tolerance: 32);
+        // At 192 DPI with useScaledDrawing=false, a 0.5 post-transform is applied, so draw
+        // coords (96-DPI space) map 1:1 to pixels. The 96x64 DIP white rect covers pixels 0-96.
+        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI fill", 28, 24, Colors.Lime, tolerance: 16);
+        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI background", 80, 8, Colors.White, tolerance: 16);
+        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI line", 48, 52, Colors.Black, tolerance: 32);
+    }
+
+    /// <summary>
+    /// Verifies correctness of the deferred batching / soft-clip / cache optimizations.
+    /// Each sub-test targets a specific bug class from the code review.
+    /// </summary>
+    private static void RunBatchCorrectnessSmoke(string outputDirectory)
+    {
+        using var bitmap = new RenderTargetBitmap(new PixelSize(200, 120), new Vector(96, 96));
+        using (var context = bitmap.CreateDrawingContext(false))
+        {
+            context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 200, 120));
+
+            // --- Item 1 & 4: Z-order across batched primitives ---
+            // Draw a line (deferred stroke), then an overlapping opaque rect (fast path).
+            // The rect must be on top of the line (rect issued after line).
+            context.DrawLine(new Pen(Brushes.Black, 3), new Point(8, 20), new Point(48, 20));
+            context.DrawRectangle(Brushes.Red, null, new Rect(12, 12, 32, 16));
+
+            // --- Item 1: clip boundary flush ---
+            // Rects drawn inside a clip must stay clipped after PopClip.
+            // Draw a rect partially outside the clip scope, then PopClip, then draw outside.
+            context.DrawRectangle(Brushes.Green, null, new Rect(56, 8, 48, 24));
+            using (context.PushClip(new Rect(60, 12, 40, 16)))
+            {
+                context.DrawRectangle(Brushes.Lime, null, new Rect(56, 8, 48, 24));
+            }
+            // After PopClip, drawing should be unclipped — verify clip outside is Green, not Lime.
+            context.DrawRectangle(Brushes.Blue, null, new Rect(108, 8, 32, 24));
+
+            // --- Item 2: group opacity with overlapping rects ---
+            // Two overlapping opaque rects at PushOpacity(0.5). Overlap must be ~50%, not 75%.
+            // In a group layer: Red fills, then Blue covers overlap → layer content is Blue in
+            // the overlap. Composited at 0.5 over white: Blue*0.5 + white*0.5 = (128,128,255).
+            using (context.PushOpacity(0.5))
+            {
+                context.DrawRectangle(Brushes.Red, null, new Rect(8, 48, 40, 32));
+                context.DrawRectangle(Brushes.Blue, null, new Rect(28, 48, 40, 32));
+            }
+
+            // --- Item 2: group opacity single rect (baseline) ---
+            using (context.PushOpacity(0.5))
+            {
+                context.DrawRectangle(Brushes.Magenta, null, new Rect(80, 48, 40, 32));
+            }
+
+            // --- Item 1: text after deferred rects ---
+            // Draw rects (deferred batch), then text. Text must be on top.
+            context.DrawRectangle(Brushes.Cyan, null, new Rect(130, 48, 60, 32));
+            var typeface = new Typeface("Arial");
+            var formatted = new FormattedText(
+                "Z",
+                System.Globalization.CultureInfo.InvariantCulture,
+                FlowDirection.LeftToRight,
+                typeface,
+                24,
+                Brushes.Black);
+            using (context.PushTransform(Matrix.CreateTranslation(140, 50)))
+            {
+                context.DrawText(formatted, new Point(0, 0));
+            }
+
+            // --- Items 8 & 9: rounded clip with different fill radius ---
+            // Clip has radius 14, fill has radius 4, same bounds. Corner must follow clip shape.
+            context.DrawRectangle(Brushes.Purple, null, new Rect(8, 88, 56, 24));
+            using (context.PushClip(new RoundedRect(new Rect(8, 88, 56, 24), 14)))
+            {
+                context.DrawRectangle(new SolidColorBrush(Colors.Yellow), null,
+                    new RoundedRect(new Rect(8, 88, 56, 24), 4));
+            }
+
+            // --- Item 1: bitmap after deferred rects ---
+            context.DrawRectangle(Brushes.Orange, null, new Rect(80, 88, 48, 24));
+            using var solidBmp = CreateSolidBitmap(Colors.Cyan, new PixelSize(24, 12));
+            context.DrawImage(solidBmp, new Rect(0, 0, 24, 12), new Rect(84, 92, 24, 12));
+
+            // --- Item 4: line then rect (ellipse fill variant) ---
+            context.DrawEllipse(Brushes.Red, null, new Rect(140, 88, 30, 24));
+            context.DrawRectangle(Brushes.Blue, null, new Rect(145, 90, 20, 16));
+
+            // --- Item 6: deferred ellipse stroke then line → line on top of stroke ---
+            // Stroke is deferred; line must flush it first so the line covers the stroke.
+            // Placed at bottom-left free area (y>=112) to avoid overlapping earlier tests.
+            context.DrawEllipse(null, new Pen(Brushes.Lime, 4), new Rect(8, 112, 20, 8));
+            context.DrawLine(new Pen(Brushes.Black, 3), new Point(10, 116), new Point(26, 116));
+
+            // --- Item 6: stroked ellipse then overlapping filled ellipse → fill on top ---
+            context.DrawEllipse(null, new Pen(Brushes.Red, 6), new Rect(40, 108, 28, 12));
+            context.DrawEllipse(Brushes.Blue, null, new Rect(46, 110, 16, 8));
+
+            // --- Item 3: empty soft-merged opacity must not leave stale opacity ---
+            // Push rounded clip + opacity, draw nothing, pop opacity, then draw opaque green.
+            // Green must be fully opaque (not 0.5 over white). Free area at top-right.
+            using (context.PushClip(new RoundedRect(new Rect(150, 8, 40, 28), 6)))
+            {
+                using (context.PushOpacity(0.5))
+                {
+                    // empty soft-merged scope
+                }
+                context.DrawRectangle(Brushes.Green, null, new Rect(150, 8, 40, 28));
+            }
+        }
+
+        var batchPath = Path.Combine(outputDirectory, "offscreen-batch.png");
+        bitmap.Save(batchPath, PngBitmapEncoderOptions.Default);
+        ScreenshotVerifier.VerifyPng(batchPath, "batch correctness");
+
+        // Item 4: line then rect → rect on top (red rect covers black line at center).
+        ScreenshotVerifier.VerifyPixel(batchPath, "line-then-rect z-order", 28, 20, Colors.Red, tolerance: 16);
+
+        // Item 1: clip outside after PopClip → Green (the pre-clip rect), not Lime.
+        ScreenshotVerifier.VerifyPixel(batchPath, "clip flush outside", 58, 10, Colors.Green, tolerance: 16);
+        // Item 1: clip inside → Lime.
+        ScreenshotVerifier.VerifyPixel(batchPath, "clip flush inside", 70, 20, Colors.Lime, tolerance: 16);
+
+        // Item 2: group opacity overlap — in a 0.5 layer, Blue covers Red in the overlap.
+        // Composited at 0.5 over white: Blue*0.5 + white*0.5 = (128,128,255).
+        // If per-primitive baking were still in effect, overlap would be ~(128,64,192).
+        ScreenshotVerifier.VerifyPixel(batchPath, "group opacity overlap", 38, 60,
+            Color.FromRgb(128, 128, 255), tolerance: 48);
+
+        // Item 2: single rect at 0.5 opacity over white → Magenta(255,0,255) at 0.5 = (255,128,255).
+        ScreenshotVerifier.VerifyPixel(batchPath, "group opacity single", 100, 60,
+            Color.FromRgb(255, 128, 255), tolerance: 48);
+
+        // Item 1: text drawn after deferred rects — text must be on top.
+        // Check a pixel in the cyan rect but outside the glyph (left margin).
+        ScreenshotVerifier.VerifyPixel(batchPath, "text over rect bg", 132, 50, Colors.Cyan, tolerance: 16);
+        // Check a pixel on the glyph itself — should be black (text on top of cyan).
+        ScreenshotVerifier.VerifyPixel(batchPath, "text over rect glyph", 144, 56, Colors.Black, tolerance: 32);
+
+        // Items 8 & 9: rounded clip corner with different fill radius → corner is Purple (clip shape).
+        ScreenshotVerifier.VerifyPixel(batchPath, "rounded clip diff radius corner", 10, 90,
+            Colors.Purple, tolerance: 32);
+
+        // Item 1: bitmap on top of deferred orange rect.
+        ScreenshotVerifier.VerifyPixel(batchPath, "bitmap over rect", 90, 96, Colors.Cyan, tolerance: 24);
+
+        // Item 4: ellipse then rect → rect on top (blue covers red).
+        ScreenshotVerifier.VerifyPixel(batchPath, "ellipse-then-rect z-order", 152, 96, Colors.Blue, tolerance: 16);
+
+        // Item 6: ellipse stroke then line → black line on top of lime stroke.
+        ScreenshotVerifier.VerifyPixel(batchPath, "ellipse-stroke-then-line z-order", 18, 116, Colors.Black, tolerance: 32);
+
+        // Item 6: stroked ellipse then filled ellipse → blue fill on top at centre.
+        ScreenshotVerifier.VerifyPixel(batchPath, "ellipse-stroke-then-fill z-order", 54, 114, Colors.Blue, tolerance: 24);
+
+        // Item 3: empty soft-merged opacity must not leave 0.5 opacity (full green, not ~half over white).
+        ScreenshotVerifier.VerifyPixel(batchPath, "empty soft-opacity no stale", 170, 22, Colors.Green, tolerance: 16);
     }
 
     private static Bitmap CreateSolidBitmap(Color color, PixelSize size)

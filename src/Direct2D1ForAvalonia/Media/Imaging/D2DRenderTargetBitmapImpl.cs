@@ -48,6 +48,12 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
             Action finishedCallback = () => Version++;
             if (_reusableDrawingContext is null || _reusableUseScaledDrawing != useScaledDrawing)
             {
+                if (_reusableDrawingContext is not null)
+                {
+                    _reusableDrawingContext.ReleaseRetainedNativeResources();
+                    _reusableDrawingContext = null;
+                }
+
                 _reusableUseScaledDrawing = useScaledDrawing;
                 _reusableDrawingContext = new DrawingContextImpl(
                     this,
@@ -73,6 +79,11 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
 
             var rect = new Rect(PixelSize.ToSizeWithDpi(Dpi));
 
+            // Source blend: replace the destination region (Avalonia composition intermediate).
+            // Prefer DrawBitmap SourceOver after the bitmap is fully closed (EndDraw already
+            // ran on the intermediate). SourceCopy-via-DrawImage has been flaky for GPU
+            // CreateCompatible bitmaps on the D3D11 texture surface; Source + DrawBitmap path
+            // below still uses Source mode but routes through a stable DrawBitmap when possible.
             d2dContext.PushBitmapBlendMode(Avalonia.Media.Imaging.BitmapBlendingMode.Source);
             try
             {
@@ -93,14 +104,22 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
 
         public override void Dispose()
         {
-            _reusableDrawingContext = null;
+            if (_reusableDrawingContext is not null)
+            {
+                _reusableDrawingContext.ReleaseRetainedNativeResources();
+                _reusableDrawingContext = null;
+            }
+
             base.Dispose();
             _renderTarget.Dispose();
         }
 
         public override OptionalDispose<ID2D1Bitmap1> GetDirect2DBitmap(ID2D1RenderTarget target)
         {
-            return new OptionalDispose<ID2D1Bitmap1>(GetBitmap(_renderTarget), true);
+            // Reuse the constructor-cached bitmap (owns: false). Creating a fresh QI per Blit
+            // with owns:true and disposing it mid-frame has been linked to black GPU-layer
+            // blits onto the D3D11 window texture.
+            return base.GetDirect2DBitmap(target);
         }
 
         protected internal override void Save(Stream stream, ContainerFormat containerFormat, int? quality)

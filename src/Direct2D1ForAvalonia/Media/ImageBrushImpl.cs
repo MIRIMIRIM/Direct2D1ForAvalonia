@@ -6,13 +6,16 @@ namespace MIR.Direct2D1ForAvalonia.Media
     internal sealed class ImageBrushImpl : BrushImpl
     {
         private readonly OptionalDispose<ID2D1Bitmap1> _bitmap;
+        private readonly BitmapImpl? _ownedBitmap;
 
         public ImageBrushImpl(
             ITileBrush brush,
             ID2D1RenderTarget target,
             BitmapImpl bitmap,
-            Rect destinationRect)
+            Rect destinationRect,
+            bool ownsBitmap = false)
         {
+            _ownedBitmap = ownsBitmap ? bitmap : null;
             var dpi = new Vector(target.Dpi.Width, target.Dpi.Height);
             var calc = new TileBrushCalculator(brush, bitmap.PixelSize.ToSizeWithDpi(dpi), destinationRect.Size);
 
@@ -30,13 +33,12 @@ namespace MIR.Direct2D1ForAvalonia.Media
             }
             else
             {
-                using (var intermediate = RenderIntermediate(target, bitmap, calc))
-                {
-                    PlatformBrush = target.CreateBitmapBrush(
-                        intermediate.Bitmap,
-                        GetBitmapBrushProperties(brush),
-                        GetBrushProperties(brush, calc.DestinationRect, destinationRect, brushOffset));
-                }
+                PlatformBrush = CreateIntermediateBrush(
+                    target,
+                    bitmap,
+                    calc,
+                    GetBitmapBrushProperties(brush),
+                    GetBrushProperties(brush, calc.DestinationRect, destinationRect, brushOffset));
             }
         }
 
@@ -44,6 +46,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         {
             _bitmap.Dispose();
             base.Dispose();
+            _ownedBitmap?.Dispose();
         }
 
         private static BitmapBrushProperties GetBitmapBrushProperties(ITileBrush brush)
@@ -90,18 +93,23 @@ namespace MIR.Direct2D1ForAvalonia.Media
             return (tileMode & TileMode.FlipY) != 0 ? ExtendMode.Mirror : ExtendMode.Wrap;
         }
 
-        private ID2D1BitmapRenderTarget RenderIntermediate(
+        private static ID2D1BitmapBrush CreateIntermediateBrush(
             ID2D1RenderTarget target,
             BitmapImpl bitmap,
-            TileBrushCalculator calc)
+            TileBrushCalculator calc,
+            BitmapBrushProperties bitmapBrushProperties,
+            BrushProperties brushProperties)
         {
-            var result = target.CreateCompatibleRenderTarget(
+            using var intermediate = target.CreateCompatibleRenderTarget(
                 calc.IntermediateSize.ToSharpDX(),
                 null,
                 null,
                 CompatibleRenderTargetOptions.None);
 
-            using (var context = new RenderTarget(result).CreateDrawingContext(true))
+            using (var context = new DrawingContextImpl(
+                       layerFactory: null,
+                       renderTarget: intermediate,
+                       useScaledDrawing: true))
             {
                 var dpi = new Vector(target.Dpi.Width, target.Dpi.Height);
                 var rect = new Rect(bitmap.PixelSize.ToSizeWithDpi(dpi));
@@ -113,7 +121,13 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 context.PopClip();
             }
 
-            return result;
+            using var intermediateBitmap = intermediate.Bitmap;
+            // CreateBitmapBrush retains its own COM reference to the bitmap. The getter RCW and
+            // compatible target can therefore be released after the brush has been created.
+            return target.CreateBitmapBrush(
+                intermediateBitmap,
+                bitmapBrushProperties,
+                brushProperties);
         }
     }
 }

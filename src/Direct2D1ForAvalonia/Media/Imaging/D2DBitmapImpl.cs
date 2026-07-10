@@ -65,4 +65,3 @@ namespace MIR.Direct2D1ForAvalonia.Media
         }
     }
 }
-;

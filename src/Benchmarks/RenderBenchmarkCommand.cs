@@ -42,10 +42,12 @@ internal static class RenderBenchmarkCommand
             foreach (var sceneName in sceneNames)
             {
                 var scene = RenderBenchmarkScenes.Get(sceneName);
+                // Honour --iterations when the user supplies it; otherwise use the scene default.
+                var iterations = options.Iterations ?? scene.Iterations;
                 var result = RunWorkerProcess(
                     backend,
                     sceneName,
-                    scene.Iterations,
+                    iterations,
                     options.Repeats,
                     options.SessionMode);
                 allResults.Add(result);

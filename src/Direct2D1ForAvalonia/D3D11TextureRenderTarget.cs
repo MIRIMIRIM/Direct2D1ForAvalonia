@@ -177,7 +177,8 @@ namespace MIR.Direct2D1ForAvalonia
                         useScaledDrawing: false,
                         finishedCallback: finishedCallback,
                         targetTransform: targetTransform,
-                        cleanupCallback: cleanupCallback);
+                        cleanupCallback: cleanupCallback,
+                        isPrimarySurface: true);
                     _reusableDrawingContext.EnableSessionReuse();
                 }
                 else
@@ -217,7 +218,12 @@ namespace MIR.Direct2D1ForAvalonia
 
         public void Dispose()
         {
-            _reusableDrawingContext = null;
+            if (_reusableDrawingContext is not null)
+            {
+                _reusableDrawingContext.ReleaseRetainedNativeResources();
+                _reusableDrawingContext = null;
+            }
+
             if (_disposed)
             {
                 return;

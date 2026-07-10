@@ -258,7 +258,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
             using var converter = Direct2D1Platform.ImagingFactory.CreateFormatConverter();
             converter.Initialize(WicImpl, Vortice.WIC.PixelFormat.Format32bppPBGRA);
 
-            var d2dBitmap = renderTarget.CreateBitmapFromWicBitmap(converter).QueryInterface<ID2D1Bitmap1>();
+            // CreateBitmapFromWicBitmap returns an ID2D1Bitmap RCW; QI to Bitmap1 and dispose the
+            // intermediate so each upload does not leave a COM ref for the finalizer.
+            using var bitmap = renderTarget.CreateBitmapFromWicBitmap(converter);
+            var d2dBitmap = bitmap.QueryInterface<ID2D1Bitmap1>();
 
             return new OptionalDispose<ID2D1Bitmap1>(d2dBitmap, true);
         }

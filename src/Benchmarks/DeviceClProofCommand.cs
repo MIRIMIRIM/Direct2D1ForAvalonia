@@ -8,8 +8,8 @@ using MIR.DirectWriteForAvalonia;
 namespace Benchmarks;
 
 /// <summary>
-/// Proves device-scoped command-list steady state: new DrawingContextImpl each paint
-/// (composition-like) should still hit DrawImage after the first frame.
+/// Proves device-scoped command-list steady state: a fresh compatible bitmap render target and
+/// native device context each paint (composition-like) should still hit after the first frame.
 /// </summary>
 internal static class DeviceClProofCommand
 {
@@ -48,7 +48,7 @@ internal static class DeviceClProofCommand
 
         // --- Path A: reuse DrawingContextImpl (same host) ---
         var reuse = Measure(target, scene, iterations, repeats, forceNewDc: false);
-        // --- Path B: new DrawingContextImpl every paint (composition intermediate-like) ---
+        // --- Path B: fresh compatible RT/native device context every paint ---
         var fresh = Measure(target, scene, iterations, repeats, forceNewDc: true);
 
         var report = new
@@ -106,7 +106,7 @@ internal static class DeviceClProofCommand
         // Cold: first paint (store CL).
         target.ResetDeviceCommandListStats();
         var coldSw = Stopwatch.StartNew();
-        using (var ctx = RenderBenchmarkCommand.WrapDrawingContext(target.CreateDrawingContext(forceNewDc)))
+        using (var ctx = RenderBenchmarkCommand.WrapDrawingContext(CreateContext(target, forceNewDc)))
             scene.Render(ctx);
         coldSw.Stop();
         target.WaitForGpu();
@@ -138,7 +138,7 @@ internal static class DeviceClProofCommand
             var sw = Stopwatch.StartNew();
             for (var i = 0; i < iterations; i++)
             {
-                using var ctx = RenderBenchmarkCommand.WrapDrawingContext(target.CreateDrawingContext(forceNewDc));
+                using var ctx = RenderBenchmarkCommand.WrapDrawingContext(CreateContext(target, forceNewDc));
                 scene.Render(ctx);
             }
 
@@ -157,6 +157,13 @@ internal static class DeviceClProofCommand
             hits,
             stores + storesAfterCold);
     }
+
+    private static Avalonia.Platform.IDrawingContextImpl CreateContext(
+        Direct2DGpuOffscreenTarget target,
+        bool freshCompatibleContext)
+        => freshCompatibleContext
+            ? target.CreateCompatibleDrawingContext()
+            : target.CreateDrawingContext(false);
 
     private sealed record ProofResult(double ColdMs, double SteadyPerIterMs, int ClHits, int ClStores);
 }

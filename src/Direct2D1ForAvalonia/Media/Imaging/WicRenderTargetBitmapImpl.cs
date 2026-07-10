@@ -31,7 +31,12 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public override void Dispose()
         {
-            _reusableDrawingContext = null;
+            if (_reusableDrawingContext is not null)
+            {
+                _reusableDrawingContext.ReleaseRetainedNativeResources();
+                _reusableDrawingContext = null;
+            }
+
             _renderTarget.Dispose();
 
             base.Dispose();
@@ -58,6 +63,12 @@ namespace MIR.Direct2D1ForAvalonia.Media
             {
                 if (_reusableDrawingContext is null || _reusableUseScaledDrawing != useScaledDrawing)
                 {
+                    if (_reusableDrawingContext is not null)
+                    {
+                        _reusableDrawingContext.ReleaseRetainedNativeResources();
+                        _reusableDrawingContext = null;
+                    }
+
                     _reusableUseScaledDrawing = useScaledDrawing;
                     _reusableDrawingContext = new DrawingContextImpl(
                         null,
