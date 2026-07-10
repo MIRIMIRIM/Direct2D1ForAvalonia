@@ -371,9 +371,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
         }
 
         /// <summary>
-        /// Axis-aligned clip fence that preserves simple-session command-list deferral.
-        /// Composition intermediates wrap paints in bounds clips; killing CL here was the main
-        /// reason windowed Sess/Off stayed ~3× despite device CL working offscreen.
+        /// Axis-aligned clip fence that preserves simple-session command-list deferral for
+        /// content drawn <em>under</em> the clip, while flushing anything already deferred
+        /// <em>before</em> the clip (must not be painted clipped — AotSmoke edge case:
+        /// red fill then PushClip then lime fill; outside-clip pixels must stay red).
         /// </summary>
         private void FenceSimpleSessionForAxisAlignedClip(Rect clip)
         {
@@ -381,7 +382,14 @@ namespace MIR.Direct2D1ForAvalonia.Media
             FlushEllipseStrokeBatch();
             if (_solidRectBatch.IsDeferredSimpleSession)
             {
-                _solidRectBatch.FlushStrokesOnly(_deviceContext, _deviceResources);
+                // Materialise pre-clip deferred ops unclipped first.
+                if (_solidRectBatch.HasPendingOps || _solidRectBatch.HasDeferredStrokes)
+                {
+                    _solidRectBatch.CommitDeferredUnderCurrentClip(
+                        _deviceContext, _deviceResources, _sessionTargetImage);
+                }
+
+                // Subsequent deferred ops are hashed with this clip identity.
                 _solidRectBatch.MixClipHash(clip);
             }
             else
@@ -457,8 +465,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 return false;
             }
 
-            // Cap deferred ops — pathological deep trees fall back to a layer.
-            if (_pureSoftOpacityOps.Count >= 32)
+            // Second+ solid under pure opacity: promote to a real group layer immediately so
+            // subsequent draws use the normal path under PushLayer (correct overlap compositing).
+            // Also caps pathological fan-out.
+            if (_pureSoftOpacityOps.Count >= 1)
             {
                 MaterializePureSoftOpacityLayer();
                 return false;
@@ -481,8 +491,13 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (_pureSoftOpacityDepth == 0 || _pureSoftOpacityLayerOpen)
                 return;
 
+            // ContentBounds are DIPs (D2D device-independent units). Default (0,0,0,0) clips
+            // away all layer content (AotSmoke group-opacity overlap was pure white). Use the
+            // device context size so high-DPI targets stay correct.
+            var dip = _deviceContext.Size;
             var parameters = new LayerParameters
             {
+                ContentBounds = new RawRectF(0, 0, dip.Width, dip.Height),
                 MaskTransform = Matrix3x2.Identity,
                 Opacity = _pureSoftOpacity
             };
@@ -504,6 +519,21 @@ namespace MIR.Direct2D1ForAvalonia.Media
         }
 
         /// <summary>
+        /// Emits SolidRectBatch / line / ellipse content that was deferred after a pure soft
+        /// opacity group was promoted to a real D2D layer — must run before PopLayer.
+        /// </summary>
+        private void FlushDeferredPrimitivesUnderOpenPureSoftLayer()
+        {
+            FlushLineBatch();
+            FlushEllipseStrokeBatch();
+            if (_solidRectBatch.HasPendingOps || _solidRectBatch.HasDeferredStrokes)
+            {
+                // Live execute under the open opacity layer; do not kill device CL store for others.
+                _solidRectBatch.MarkNonSimple(_deviceContext, _deviceResources);
+            }
+        }
+
+        /// <summary>
         /// Closes pure soft opacity: soft-bake non-overlapping solids, or a real layer when needed.
         /// </summary>
         private void FlushPureSoftOpacity(bool forceLayer)
@@ -513,6 +543,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
             if (_pureSoftOpacityLayerOpen)
             {
+                // Mid-scope materialise left a real D2D opacity layer open. Later simple solids
+                // may still be deferred in SolidRectBatch — they must execute *inside* the layer
+                // before PopLayer (group opacity overlap: red then blue → blue in overlap at 0.5).
+                FlushDeferredPrimitivesUnderOpenPureSoftLayer();
                 PopLayer();
                 _pureSoftOpacityLayerOpen = false;
                 _pureSoftOpacityDepth = 0;
@@ -524,7 +558,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
             {
                 MaterializePureSoftOpacityLayer();
                 if (_pureSoftOpacityLayerOpen)
+                {
+                    FlushDeferredPrimitivesUnderOpenPureSoftLayer();
                     PopLayer();
+                }
                 _pureSoftOpacityLayerOpen = false;
                 _pureSoftOpacityDepth = 0;
                 _pureSoftOpacityOps.Clear();
