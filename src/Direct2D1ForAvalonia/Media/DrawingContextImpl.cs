@@ -56,6 +56,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
         // resources — the same pen produces the same ID2D1StrokeStyle every time, so caching avoids
         // a COM allocation per stroked draw call.
         private readonly Dictionary<StrokeStyleKey, ID2D1StrokeStyle> _strokeStyleCache = new();
+        // Cross-frame device-resource cache keyed on the render target. Used for gradient stop
+        // collections, which depend only on stops+spread (not geometry) and so recur every frame.
+        private readonly D2DDeviceResourceCache _deviceResources;
         private RenderOptions _renderOptions;
         private TextOptions _textOptions;
         private readonly Matrix? _postTransform;
@@ -91,6 +94,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             _targetTransform = targetTransform;
             _cleanupCallback = cleanupCallback;
             _diagnosticTargetName = _renderTarget.GetType().Name;
+            _deviceResources = D2DDeviceResourceCache.For(_renderTarget);
 
             if (_renderTarget is ID2D1DeviceContext deviceContext)
             {
@@ -1362,11 +1366,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
             }
             else if (linearGradientBrush != null)
             {
-                return new LinearGradientBrushImpl(linearGradientBrush, _deviceContext, destinationRect);
+                return new LinearGradientBrushImpl(linearGradientBrush, _deviceContext, destinationRect, _deviceResources);
             }
             else if (radialGradientBrush != null)
             {
-                return new RadialGradientBrushImpl(radialGradientBrush, _deviceContext, destinationRect);
+                return new RadialGradientBrushImpl(radialGradientBrush, _deviceContext, destinationRect, _deviceResources);
             }
             else if (conicGradientBrush != null)
             {
