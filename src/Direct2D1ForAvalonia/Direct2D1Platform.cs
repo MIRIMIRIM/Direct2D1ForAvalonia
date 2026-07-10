@@ -204,6 +204,12 @@ namespace MIR.Direct2D1ForAvalonia
 
         public IRenderTargetBitmapImpl CreateRenderTargetBitmap(PixelSize size, Vector dpi)
         {
+            // Prefer GPU (D3D11 texture + D2D DC) so offscreen RenderTargetBitmap matches the
+            // window path. Falls back to WIC only if the device was never initialised.
+            // Save/CopyPixels/Lock perform a staging readback lazily.
+            if (Direct2D1Device is not null && Direct3D11Device is not null)
+                return new Media.Imaging.D2DGpuRenderTargetBitmapImpl(size, dpi);
+
             return new WicRenderTargetBitmapImpl(size, dpi);
         }
 

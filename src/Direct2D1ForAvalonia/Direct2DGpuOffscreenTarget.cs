@@ -15,12 +15,10 @@ namespace MIR.Direct2D1ForAvalonia
     /// <summary>
     /// A GPU-backed offscreen Direct2D render target for benchmarking and headless rendering.
     /// <para>
-    /// The normal <see cref="Media.Imaging.WicRenderTargetBitmapImpl"/> path (used by Avalonia's
-    /// <c>RenderTargetBitmap</c>) is a CPU/WIC software rasteriser. Real window rendering instead
-    /// goes through <see cref="D3D11TextureRenderTarget"/>, which draws onto a D3D11 texture with a
-    /// GPU-accelerated <see cref="Vortice.Direct2D1.ID2D1DeviceContext"/>. This class reproduces that
-    /// GPU path without needing a window/swap chain: it allocates its own render-target texture,
-    /// wraps it as a D2D target bitmap, and drives the exact same <see cref="DrawingContextImpl"/>.
+    /// Avalonia <c>RenderTargetBitmap</c> uses <see cref="Media.Imaging.D2DGpuRenderTargetBitmapImpl"/>
+    /// (GPU) when the D2D device is available, with WIC as fallback. This class is a standalone
+    /// GPU offscreen surface for benchmarks: D3D11 texture + D2D device context, same draw path
+    /// as <see cref="D3D11TextureRenderTarget"/> without a window/swap chain.
     /// </para>
     /// <para>
     /// Requires <see cref="Direct2D1Platform"/> to be initialised (i.e. <c>UseDirect2D1()</c> applied

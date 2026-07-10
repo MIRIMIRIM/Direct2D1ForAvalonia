@@ -44,6 +44,8 @@ AppBuilder.Configure<App>()
 
 - **Windows only.** Direct2D1/DirectWrite are not available on other platforms.
 - **Window surfaces.** `UseDirect2D1()` renders windows when Avalonia supplies an `IDirect3D11TexturePlatformSurface`, or when the host supplies an external Direct2D render target (`IExternalDirect2DRenderTargetSurface`). Bare-HWND swap chains and the software framebuffer fallback are not supported and will throw `NotSupportedException` at render-target creation.
+- **RenderTargetBitmap.** Created on the GPU (D3D11 texture + D2D device context) when Direct2D is initialised, matching Avalonia.Skia's DIP scaling (`useScaledDrawing: true`). `Save` / `CopyPixels` / `Lock` perform a staging readback lazily. Falls back to WIC only if no D2D device exists.
+- **High DPI.** Drawing coordinates for `RenderTargetBitmap` are device-independent pixels (DIPs), same as Skia: at 192 DPI a logical `Rect(0,0,96,64)` fills a `192×128` pixel bitmap.
 - **Bitmap formats.** `Bitmap.Save` accepts `.png`, `.jpg/.jpeg`, `.bmp`, `.tif/.tiff`, `.gif`, and `.webp` via the file extension. The optional `quality` parameter is applied to JPEG output through WIC's `ImageQuality` encoder option.
 - **Path segmenting.** `Geometry.TryGetSegment` is supported through a Direct2D length-sampled polyline approximation. It preserves path trimming behavior, but returned curve segments are flattened rather than retaining their original Bezier/arc commands.
 - **Text parity.** DirectWrite shaping is validated against Avalonia's Skia/HarfBuzz path, but a small set of engine/font-metric divergences is tracked as known rather than bit-for-bit identical.

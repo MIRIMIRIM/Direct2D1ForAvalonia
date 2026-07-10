@@ -187,8 +187,10 @@ internal static class OffscreenSmoke
 
     private static void RunDpiSmoke(string outputDirectory)
     {
+        // Avalonia.Skia.RenderTargetBitmapImpl always uses useScaledDrawing=true (DIP coords).
+        // PixelSize 192×128 @ 192 DPI ⇒ DIP surface 96×64; Rect(0,0,96,64) fills the bitmap.
         using var bitmap = new RenderTargetBitmap(new PixelSize(192, 128), new Vector(192, 192));
-        using (var context = bitmap.CreateDrawingContext(false))
+        using (var context = bitmap.CreateDrawingContext())
         {
             context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 96, 64));
             context.DrawRectangle(Brushes.Lime, null, new Rect(16, 14, 28, 24));
@@ -198,11 +200,13 @@ internal static class OffscreenSmoke
         var dpiPath = Path.Combine(outputDirectory, "offscreen-dpi192.png");
         bitmap.Save(dpiPath, PngBitmapEncoderOptions.Default);
         ScreenshotVerifier.VerifyPng(dpiPath, "offscreen high DPI");
-        // At 192 DPI with useScaledDrawing=false, a 0.5 post-transform is applied, so draw
-        // coords (96-DPI space) map 1:1 to pixels. The 96x64 DIP white rect covers pixels 0-96.
-        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI fill", 28, 24, Colors.Lime, tolerance: 16);
-        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI background", 80, 8, Colors.White, tolerance: 16);
-        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI line", 48, 52, Colors.Black, tolerance: 32);
+        // DIP → pixel: × (192/96) = ×2.
+        // Lime DIP (16,14)-(44,38) → pixels (32,28)-(88,76); sample center (60,52).
+        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI fill", 60, 52, Colors.Lime, tolerance: 16);
+        // Background outside lime (DIP ~8,4 → pixel 16,8).
+        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI background", 16, 8, Colors.White, tolerance: 16);
+        // Line at DIP y=52 → pixel y=104.
+        ScreenshotVerifier.VerifyPixel(dpiPath, "high DPI line", 96, 104, Colors.Black, tolerance: 32);
     }
 
     /// <summary>

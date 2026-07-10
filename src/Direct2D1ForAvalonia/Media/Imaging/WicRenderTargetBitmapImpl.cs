@@ -42,7 +42,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
             base.Dispose();
         }
 
-        public IDrawingContextImpl CreateDrawingContext() => CreateDrawingContext(useScaledDrawing: false);
+        // Match Avalonia.Skia.RenderTargetBitmapImpl: DIP coordinates scaled by bitmap DPI.
+        public IDrawingContextImpl CreateDrawingContext() => CreateDrawingContext(useScaledDrawing: true);
 
         public virtual IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing)
             => CreateDrawingContext(useScaledDrawing, null);
