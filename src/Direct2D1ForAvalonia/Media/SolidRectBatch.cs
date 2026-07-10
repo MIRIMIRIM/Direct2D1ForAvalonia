@@ -9,6 +9,20 @@ namespace MIR.Direct2D1ForAvalonia.Media;
 /// <summary>
 /// Batches opaque solid rect / uniform-rounded-rect strokes and optionally replays a whole
 /// simple-only session through an <see cref="ID2D1CommandList"/> (static subtree / stable frames).
+/// <para>
+/// <b>Correctness contract (does not change Avalonia API semantics when respected):</b>
+/// </para>
+/// <list type="bullet">
+/// <item>Translucent fills/strokes (opacity &lt; 1) never enter the batch — strict issue order.</item>
+/// <item>Deferred strokes flush before any later fill that intersects their outset bounds.</item>
+/// <item>Any non-simple op / transform / clip / Clear / render-options change materialises the batch
+/// and invalidates the command list (no stale replay across different content or state).</item>
+/// <item>Command-list replay requires a byte-identical op stream (geometry + colors + target size).
+/// Lists live on the <see cref="D2DDeviceResourceCache"/> (device-scoped) so composition
+/// intermediate targets that allocate a new DC/bitmap each dirty paint still hit steady-state.</item>
+/// </list>
+/// Real apps: Avalonia re-issues full render-data for a dirty visual; hash mismatch forces rebuild.
+/// Partial/incremental draw streams that differ from the cached list never hit replay.
 /// </summary>
 internal sealed class SolidRectBatch
 {
@@ -17,24 +31,40 @@ internal sealed class SolidRectBatch
     private readonly List<StrokeEntry> _strokes = new(64);
     private readonly List<SimpleRectOp> _ops = new(128);
 
-    private ID2D1CommandList? _cachedCommandList;
-    private long _cachedHash;
-
     private long _sessionHash;
     private bool _sessionOnlySimple = true;
     private bool _deferSimpleSession;
     private bool _active;
+    private int _pixelW;
+    private int _pixelH;
 
     /// <summary>True when this session is logging simple rects without immediate GPU fills.</summary>
     public bool IsDeferredSimpleSession => _deferSimpleSession && _sessionOnlySimple;
 
     public bool HasDeferredStrokes => _strokes.Count > 0;
 
-    public void BeginSession(bool enableCommandListReuse)
+    /// <summary>Command-list cache hits this process (for diagnostics / benches).</summary>
+    public int CommandListHits { get; private set; }
+
+    /// <summary>Command-list rebuilds / misses this process.</summary>
+    public int CommandListMisses { get; private set; }
+
+    public void BeginSession(bool enableCommandListReuse, int pixelWidth = 0, int pixelHeight = 0)
     {
         _strokes.Clear();
         _ops.Clear();
+        _pixelW = pixelWidth;
+        _pixelH = pixelHeight;
         _sessionHash = unchecked((long)14695981039346656037);
+        // Target size is part of the content fingerprint so a resize never replays a wrong CL.
+        unchecked
+        {
+            _sessionHash ^= pixelWidth;
+            _sessionHash *= 1099511628211;
+            _sessionHash ^= pixelHeight;
+            _sessionHash *= 1099511628211;
+        }
+
         _sessionOnlySimple = true;
         // When the host reuses this DC across frames, defer simple rects so EndSession can
         // DrawImage(commandList) on cache hit, or record+draw once on miss (first frame / change).
@@ -59,15 +89,8 @@ internal sealed class SolidRectBatch
             FlushStrokes(dc, resources);
         }
 
+        // Do not wipe the device-scoped CL cache — other visuals may still use those entries.
         _sessionOnlySimple = false;
-        InvalidateCommandListCache();
-    }
-
-    public void InvalidateCommandListCache()
-    {
-        _cachedCommandList?.Dispose();
-        _cachedCommandList = null;
-        _cachedHash = 0;
     }
 
     /// <summary>
@@ -89,8 +112,8 @@ internal sealed class SolidRectBatch
         if (!_active)
             BeginSession(enableCommandListReuse: false);
 
-        // Translucent: force live path (caller should use non-batch immediate draw).
-        if (fill is { Opacity: < 0.999 } || stroke is { Opacity: < 0.999 })
+        // Translucent (brush opacity or per-color alpha): keep strict issue order — no batch/CL.
+        if (!IsFullyOpaque(fill) || !IsFullyOpaque(stroke))
             return false;
 
         var op = new SimpleRectOp(
@@ -180,26 +203,23 @@ internal sealed class SolidRectBatch
         {
             if (_deferSimpleSession && _sessionOnlySimple && _ops.Count > 0)
             {
-                if (_cachedCommandList is not null && _cachedHash == _sessionHash)
+                if (resources.TryGetCommandList(_sessionHash, _pixelW, _pixelH, out var cached))
                 {
-                    dc.DrawImage(_cachedCommandList);
+                    CommandListHits++;
+                    dc.DrawImage(cached);
                     return;
                 }
 
-                // Hash miss or first build after invalidate: record into CL and draw once.
+                // Hash miss: record into a device-scoped CL and draw once.
+                CommandListMisses++;
                 if (!TryRecordOpsToCommandListAndDraw(dc, resources))
-                {
                     ExecuteOps(dc, resources, buildStrokeBatch: true);
-                }
 
                 return;
             }
 
             // Live path (no session deferral): flush deferred strokes only.
             FlushStrokes(dc, resources);
-
-            if (!_sessionOnlySimple)
-                InvalidateCommandListCache();
         }
         finally
         {
@@ -313,16 +333,13 @@ internal sealed class SolidRectBatch
             dc.Target = previousTarget;
             dc.DrawImage(cl);
 
-            _cachedCommandList?.Dispose();
-            _cachedCommandList = cl;
-            _cachedHash = _sessionHash;
+            resources.StoreCommandList(_sessionHash, _pixelW, _pixelH, cl);
             return true;
         }
         catch
         {
             try { dc.Target = previousTarget; } catch { /* ignore */ }
             cl.Dispose();
-            InvalidateCommandListCache();
             return false;
         }
     }
@@ -452,6 +469,13 @@ internal sealed class SolidRectBatch
 
     private static bool ColorEquals(Color a, Color b)
         => a.A == b.A && a.R == b.R && a.G == b.G && a.B == b.B;
+
+    /// <summary>
+    /// Brush is absent, or both <see cref="ISolidColorBrush.Opacity"/> and color alpha are fully opaque.
+    /// </summary>
+    internal static bool IsFullyOpaque(ISolidColorBrush? brush)
+        => brush is null
+           || (brush.Opacity >= 0.999 && brush.Color.A >= 255);
 
     private readonly struct StrokeEntry
     {

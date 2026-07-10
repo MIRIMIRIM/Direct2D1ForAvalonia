@@ -111,8 +111,11 @@ internal static class RenderBenchmarkCommand
             return;
         }
 
+        var extra = "";
+        if (r.FirstFrameMs is double ff && r.SteadyPerIterMs is double st)
+            extra = $"  first={ff:0.###}ms  steady/iter={st:0.####}ms";
         Console.WriteLine(
-            $"    {label}: {r.MedianMs:0.###} ms  ({r.OpsPerSecond:0.###} ops/s)  alloc={r.AllocatedBytes} B");
+            $"    {label}: {r.MedianMs:0.###} ms  ({r.OpsPerSecond:0.###} ops/s)  alloc={r.AllocatedBytes} B{extra}");
     }
 
     static void PrintRatio(string label, BackendBenchmarkResult? a, BackendBenchmarkResult? b)
@@ -216,10 +219,12 @@ internal static class RenderBenchmarkCommand
 
         var elapsedValues = new double[repeats];
         var allocatedValues = new long[repeats];
+        var firstFrameValues = isD2dGpu ? new double[repeats] : null;
+        var steadyValues = isD2dGpu ? new double[repeats] : null;
 
         var sessionMode = options.SessionMode;
         if (isD2dGpu)
-            RunD2dGpu(scene, iterations, repeats, elapsedValues, allocatedValues, sessionMode);
+            RunD2dGpu(scene, iterations, repeats, elapsedValues, allocatedValues, sessionMode, firstFrameValues, steadyValues);
         else if (isSkiaGpu)
             RunSkiaGpu(scene, iterations, repeats, elapsedValues, allocatedValues, sessionMode);
         else
@@ -232,6 +237,20 @@ internal static class RenderBenchmarkCommand
         var medianAlloc = allocatedValues[repeats / 2];
         var opsPerSecond = iterations / (median / 1000.0);
 
+        double? firstFrameMedian = null;
+        double? steadyPerIterMedian = null;
+        if (firstFrameValues is not null)
+        {
+            Array.Sort(firstFrameValues);
+            firstFrameMedian = firstFrameValues[repeats / 2];
+        }
+
+        if (steadyValues is not null)
+        {
+            Array.Sort(steadyValues);
+            steadyPerIterMedian = steadyValues[repeats / 2];
+        }
+
         var result = new BackendBenchmarkResult(
             backend,
             sceneName,
@@ -239,7 +258,9 @@ internal static class RenderBenchmarkCommand
             repeats,
             median,
             opsPerSecond,
-            medianAlloc);
+            medianAlloc,
+            firstFrameMedian,
+            steadyPerIterMedian);
 
         Console.Write(JsonSerializer.Serialize(result));
         return 0;
@@ -305,10 +326,13 @@ internal static class RenderBenchmarkCommand
         int repeats,
         double[] elapsedValues,
         long[] allocatedValues,
-        string sessionMode)
+        string sessionMode,
+        double[]? firstFrameMs = null,
+        double[]? steadyMs = null)
     {
         using var target = new Direct2DGpuOffscreenTarget(scene.Size, scene.Dpi);
 
+        // Cold paint (builds caches / first command list). Not included in steady timing.
         using (var context = WrapDrawingContext(target.CreateDrawingContext()))
             scene.Render(context);
         target.WaitForGpu();
@@ -322,18 +346,28 @@ internal static class RenderBenchmarkCommand
 
             var startAlloc = GC.GetAllocatedBytesForCurrentThread();
             var sw = Stopwatch.StartNew();
+            double firstMs = 0;
 
             if (batched)
             {
                 using (var context = WrapDrawingContext(target.CreateDrawingContext()))
                 {
-                    for (var i = 0; i < iterations; i++)
+                    var t0 = Stopwatch.GetTimestamp();
+                    scene.Render(context);
+                    firstMs = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
+                    for (var i = 1; i < iterations; i++)
                         scene.Render(context);
                 }
             }
             else
             {
-                for (var i = 0; i < iterations; i++)
+                // First timed frame after cold warmup (usually command-list hit when reuse is on).
+                var t0 = Stopwatch.GetTimestamp();
+                using (var context = WrapDrawingContext(target.CreateDrawingContext()))
+                    scene.Render(context);
+                firstMs = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
+
+                for (var i = 1; i < iterations; i++)
                 {
                     using var context = WrapDrawingContext(target.CreateDrawingContext());
                     scene.Render(context);
@@ -345,6 +379,10 @@ internal static class RenderBenchmarkCommand
             sw.Stop();
             elapsedValues[repeat] = sw.Elapsed.TotalMilliseconds;
             allocatedValues[repeat] = Math.Max(0, GC.GetAllocatedBytesForCurrentThread() - startAlloc);
+            if (firstFrameMs is not null)
+                firstFrameMs[repeat] = firstMs;
+            if (steadyMs is not null && iterations > 1)
+                steadyMs[repeat] = (elapsedValues[repeat] - firstMs) / (iterations - 1);
         }
     }
 
@@ -662,7 +700,11 @@ internal sealed record BackendBenchmarkResult(
     int Repeats,
     double MedianMs,
     double OpsPerSecond,
-    long AllocatedBytes);
+    long AllocatedBytes,
+    /// <summary>D2D-GPU only: median wall time of the first timed frame (often still CL-warm after external warmup).</summary>
+    double? FirstFrameMs = null,
+    /// <summary>D2D-GPU only: median (total − first) / (iters − 1) after GPU barrier — steady per-frame cost.</summary>
+    double? SteadyPerIterMs = null);
 
 internal sealed record RenderBenchmarkOptions(
     string? Backend,

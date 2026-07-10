@@ -27,9 +27,16 @@ internal sealed class D2DDeviceResourceCache
     // Fallback for non-device-context targets (e.g. pure WIC RT without a device association).
     private static readonly ConditionalWeakTable<ID2D1RenderTarget, D2DDeviceResourceCache> s_renderTargetCaches = new();
 
+    private const int MaxCommandLists = 48;
+
     private readonly Dictionary<GradientStopKey, ID2D1GradientStopCollection> _gradientStops = new();
     private readonly Dictionary<SolidBrushKey, SolidColorBrushImpl> _solidBrushes = new();
     private readonly Dictionary<StrokeStyleKey, ID2D1StrokeStyle> _strokeStyles = new();
+    // Simple solid-rect session command lists, shared across all DCs on this device so
+    // composition intermediate targets (new bitmap RT / new DrawingContextImpl each dirty
+    // paint) still hit steady-state DrawImage replay.
+    private readonly Dictionary<CommandListKey, ID2D1CommandList> _commandLists = new();
+    private readonly LinkedList<CommandListKey> _commandListLru = new();
 
     public static D2DDeviceResourceCache For(ID2D1RenderTarget renderTarget)
     {
@@ -135,6 +142,86 @@ internal sealed class D2DDeviceResourceCache
         // Avalonia default miter limit is 10 — same as D2D's default when style is null.
         return Math.Abs(pen.MiterLimit - 10.0) < 0.001;
     }
+
+    /// <summary>
+    /// Looks up a previously recorded simple-session command list for the same content hash
+    /// and target pixel size. Caller must not dispose the returned list.
+    /// </summary>
+    public bool TryGetCommandList(long contentHash, int pixelWidth, int pixelHeight, out ID2D1CommandList commandList)
+    {
+        var key = new CommandListKey(contentHash, pixelWidth, pixelHeight);
+        if (_commandLists.TryGetValue(key, out var cached) && cached is not null)
+        {
+            TouchCommandList(key);
+            commandList = cached;
+            return true;
+        }
+
+        commandList = null!;
+        return false;
+    }
+
+    /// <summary>
+    /// Stores a command list for cross-context replay. Takes ownership of <paramref name="commandList"/>.
+    /// </summary>
+    public void StoreCommandList(long contentHash, int pixelWidth, int pixelHeight, ID2D1CommandList commandList)
+    {
+        var key = new CommandListKey(contentHash, pixelWidth, pixelHeight);
+        if (_commandLists.TryGetValue(key, out var existing))
+        {
+            if (!ReferenceEquals(existing, commandList))
+                existing.Dispose();
+            _commandLists[key] = commandList;
+            TouchCommandList(key);
+            return;
+        }
+
+        while (_commandLists.Count >= MaxCommandLists && _commandListLru.Count > 0)
+        {
+            var oldest = _commandListLru.First!.Value;
+            _commandListLru.RemoveFirst();
+            if (_commandLists.Remove(oldest, out var evicted))
+                evicted.Dispose();
+        }
+
+        _commandLists[key] = commandList;
+        _commandListLru.AddLast(key);
+    }
+
+    private void TouchCommandList(CommandListKey key)
+    {
+        var node = _commandListLru.Find(key);
+        if (node is null)
+        {
+            _commandListLru.AddLast(key);
+            return;
+        }
+
+        _commandListLru.Remove(node);
+        _commandListLru.AddLast(key);
+    }
+}
+
+/// <summary>Key for device-scoped simple-session command lists (content + target size).</summary>
+internal readonly struct CommandListKey : IEquatable<CommandListKey>
+{
+    private readonly long _hash;
+    private readonly int _width;
+    private readonly int _height;
+
+    public CommandListKey(long contentHash, int pixelWidth, int pixelHeight)
+    {
+        _hash = contentHash;
+        _width = pixelWidth;
+        _height = pixelHeight;
+    }
+
+    public bool Equals(CommandListKey other)
+        => _hash == other._hash && _width == other._width && _height == other._height;
+
+    public override bool Equals(object? obj) => obj is CommandListKey other && Equals(other);
+
+    public override int GetHashCode() => HashCode.Combine(_hash, _width, _height);
 }
 
 /// <summary>

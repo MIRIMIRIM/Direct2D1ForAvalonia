@@ -75,6 +75,20 @@ namespace MIR.Direct2D1ForAvalonia.Media
         // collections, which depend only on stops+spread (not geometry) and so recur every frame.
         private readonly D2DDeviceResourceCache _deviceResources;
         private readonly SolidRectBatch _solidRectBatch = new();
+        // Same-pen opaque line batch (MixedScene grid lines, separators, etc.).
+        private readonly List<(Point A, Point B)> _lineBatch = new(32);
+        private Color _lineBatchColor;
+        private double _lineBatchOpacity;
+        private float _lineBatchThickness;
+        private ID2D1StrokeStyle? _lineBatchStyle;
+        private bool _lineBatchActive;
+        // Same-pen opaque ellipse stroke batch (fills issued immediately).
+        private readonly List<Ellipse> _ellipseStrokeBatch = new(16);
+        private Color _ellipseStrokeColor;
+        private double _ellipseStrokeOpacity;
+        private float _ellipseStrokeThickness;
+        private ID2D1StrokeStyle? _ellipseStrokeStyle;
+        private bool _ellipseStrokeBatchActive;
         private RenderOptions _renderOptions;
         private TextOptions _textOptions;
         private readonly Matrix? _postTransform;
@@ -156,8 +170,21 @@ namespace MIR.Direct2D1ForAvalonia.Media
         {
             _retainAcrossSessions = true;
             // Constructor already opened a session with deferral off; re-arm before any draws.
-            _solidRectBatch.BeginSession(enableCommandListReuse: true);
+            var pw = 0;
+            var ph = 0;
+            try
+            {
+                pw = _deviceContext.PixelSize.Width;
+                ph = _deviceContext.PixelSize.Height;
+            }
+            catch { /* ignore */ }
+
+            _solidRectBatch.BeginSession(enableCommandListReuse: true, pw, ph);
         }
+
+        /// <summary>Command-list cache stats for diagnostics (simple solid-rect sessions only).</summary>
+        internal (int Hits, int Misses) CommandListStats
+            => (_solidRectBatch.CommandListHits, _solidRectBatch.CommandListMisses);
 
         /// <summary>
         /// Reopens a previously disposed drawing context for another frame on the same device
@@ -208,7 +235,23 @@ namespace MIR.Direct2D1ForAvalonia.Media
             _pushClips = 0;
             _pushOpacities = 0;
             _drawRectangles = 0;
-            _solidRectBatch.BeginSession(enableCommandListReuse: _retainAcrossSessions);
+            _lineBatch.Clear();
+            _lineBatchActive = false;
+            _ellipseStrokeBatch.Clear();
+            _ellipseStrokeBatchActive = false;
+            var pw = 0;
+            var ph = 0;
+            try
+            {
+                pw = _deviceContext.PixelSize.Width;
+                ph = _deviceContext.PixelSize.Height;
+            }
+            catch { /* ignore */ }
+
+            // Defer simple solid sessions whenever we have a device-scoped CL cache (GPU path).
+            // Composition intermediates often allocate a new DrawingContextImpl per dirty paint;
+            // device-level CL still hits across those instances.
+            _solidRectBatch.BeginSession(enableCommandListReuse: true, pw, ph);
             DrawingContextCallStats.OnSessionOpen(_diagnosticTargetName);
             _deviceContext.BeginDraw();
 
@@ -220,12 +263,118 @@ namespace MIR.Direct2D1ForAvalonia.Media
         }
 
         /// <summary>
-        /// Flushes deferred solid-rect strokes / leaves simple-session deferral (call before any
-        /// non-simple draw or state change that must observe prior primitives).
+        /// Flushes deferred solid-rect strokes / lines / ellipse strokes and leaves simple-session
+        /// deferral (call before any non-simple draw or state change).
         /// </summary>
         private void FlushPrimitiveBatch()
         {
+            FlushLineBatch();
+            FlushEllipseStrokeBatch();
             _solidRectBatch.MarkNonSimple(_deviceContext, _deviceResources);
+        }
+
+        private void FlushLineBatch()
+        {
+            if (!_lineBatchActive || _lineBatch.Count == 0)
+            {
+                _lineBatchActive = false;
+                _lineBatch.Clear();
+                return;
+            }
+
+            var brush = _deviceResources.GetOrCreateSolidBrush(
+                _deviceContext, _lineBatchColor, _lineBatchOpacity);
+            if (brush.PlatformBrush is not null)
+            {
+                // Multi-figure path only when enough segments amortize CreatePathGeometry.
+                if (_lineBatch.Count >= 8)
+                {
+                    using var path = Direct2D1Platform.Direct2D1Factory.CreatePathGeometry();
+                    using (var sink = path.Open())
+                    {
+                        for (var i = 0; i < _lineBatch.Count; i++)
+                        {
+                            var (a, b) = _lineBatch[i];
+                            sink.BeginFigure(a.ToVortice(), FigureBegin.Hollow);
+                            sink.AddLine(b.ToVortice());
+                            sink.EndFigure(FigureEnd.Open);
+                        }
+
+                        sink.Close();
+                    }
+
+                    if (_lineBatchStyle is null)
+                        _deviceContext.DrawGeometry(path, brush.PlatformBrush, _lineBatchThickness);
+                    else
+                        _deviceContext.DrawGeometry(path, brush.PlatformBrush, _lineBatchThickness, _lineBatchStyle);
+                }
+                else
+                {
+                    for (var i = 0; i < _lineBatch.Count; i++)
+                    {
+                        var (a, b) = _lineBatch[i];
+                        if (_lineBatchStyle is null)
+                            _deviceContext.DrawLine(a.ToVortice(), b.ToVortice(), brush.PlatformBrush, _lineBatchThickness);
+                        else
+                            _deviceContext.DrawLine(a.ToVortice(), b.ToVortice(), brush.PlatformBrush, _lineBatchThickness, _lineBatchStyle);
+                    }
+                }
+            }
+
+            _lineBatch.Clear();
+            _lineBatchActive = false;
+            _lineBatchStyle = null;
+        }
+
+        private void FlushEllipseStrokeBatch()
+        {
+            if (!_ellipseStrokeBatchActive || _ellipseStrokeBatch.Count == 0)
+            {
+                _ellipseStrokeBatchActive = false;
+                _ellipseStrokeBatch.Clear();
+                return;
+            }
+
+            var brush = _deviceResources.GetOrCreateSolidBrush(
+                _deviceContext, _ellipseStrokeColor, _ellipseStrokeOpacity);
+            if (brush.PlatformBrush is not null)
+            {
+                // GeometryGroup only when enough ellipses amortize COM setup (Mixed has 5).
+                if (_ellipseStrokeBatch.Count >= 6)
+                {
+                    var factory = Direct2D1Platform.Direct2D1Factory;
+                    var geos = new ID2D1Geometry[_ellipseStrokeBatch.Count];
+                    try
+                    {
+                        for (var i = 0; i < geos.Length; i++)
+                            geos[i] = factory.CreateEllipseGeometry(_ellipseStrokeBatch[i]);
+                        using var group = factory.CreateGeometryGroup(FillMode.Winding, geos);
+                        if (_ellipseStrokeStyle is null)
+                            _deviceContext.DrawGeometry(group, brush.PlatformBrush, _ellipseStrokeThickness);
+                        else
+                            _deviceContext.DrawGeometry(group, brush.PlatformBrush, _ellipseStrokeThickness, _ellipseStrokeStyle);
+                    }
+                    finally
+                    {
+                        for (var i = 0; i < geos.Length; i++)
+                            geos[i]?.Dispose();
+                    }
+                }
+                else
+                {
+                    for (var i = 0; i < _ellipseStrokeBatch.Count; i++)
+                    {
+                        if (_ellipseStrokeStyle is null)
+                            _deviceContext.DrawEllipse(_ellipseStrokeBatch[i], brush.PlatformBrush, _ellipseStrokeThickness);
+                        else
+                            _deviceContext.DrawEllipse(_ellipseStrokeBatch[i], brush.PlatformBrush, _ellipseStrokeThickness, _ellipseStrokeStyle);
+                    }
+                }
+            }
+
+            _ellipseStrokeBatch.Clear();
+            _ellipseStrokeBatchActive = false;
+            _ellipseStrokeStyle = null;
         }
 
         /// <summary>
@@ -248,6 +397,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
             get => _renderOptions;
             set
             {
+                // AA / blend changes must not apply mid-batch or to a stale command list.
+                FlushPrimitiveBatch();
                 _renderOptions = value;
                 ApplyRenderOptions(value);
             }
@@ -305,7 +456,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
                         $"drawing-context-dispose begin target={_diagnosticTargetName} hasSwapChain={_swapChain != null} hasFinishedCallback={_finishedCallback != null} hasCleanupCallback={_cleanupCallback != null}");
                 }
 
-                // Stroke multi-batch + optional command-list replay/rebuild for simple sessions.
+                // Line / ellipse stroke batches, then solid-rect stroke batch + optional CL replay.
+                FlushLineBatch();
+                FlushEllipseStrokeBatch();
                 _solidRectBatch.EndSession(_deviceContext, _deviceResources);
 
                 Direct2D1FrameProfiler.MarkEndDrawStart(
@@ -544,27 +697,70 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="p2">The second point of the line.</param>
         public void DrawLine(IPen? pen, Point p1, Point p2)
         {
-            FlushPrimitiveBatch();
-            FlushDeferredClip();
-            if (pen?.Brush != null)
-            {
-                var bounds = new Rect(p1, p2);
+            // Leaving pure solid-rect CL session; keep line batching for Mixed-style grids.
+            if (_solidRectBatch.IsDeferredSimpleSession || _solidRectBatch.HasDeferredStrokes)
+                _solidRectBatch.MarkNonSimple(_deviceContext, _deviceResources);
 
-                using (var d2dBrush = CreateBrush(pen.Brush, bounds))
+            FlushDeferredClip();
+            if (pen?.Brush is not ISolidColorBrush solid || pen.Thickness <= 0)
+            {
+                FlushLineBatch();
+                if (pen?.Brush != null)
                 {
+                    var bounds = new Rect(p1, p2);
+                    using var d2dBrush = CreateBrush(pen.Brush, bounds);
                     var d2dStroke = GetOrCreateStrokeStyle(pen);
                     if (d2dBrush.PlatformBrush != null)
                     {
-                        _deviceContext.DrawLine(
-                            p1.ToVortice(),
-                            p2.ToVortice(),
-                            d2dBrush.PlatformBrush,
-                            (float)pen.Thickness,
-                            d2dStroke);
+                        if (d2dStroke is null)
+                            _deviceContext.DrawLine(p1.ToVortice(), p2.ToVortice(), d2dBrush.PlatformBrush, (float)pen.Thickness);
+                        else
+                            _deviceContext.DrawLine(p1.ToVortice(), p2.ToVortice(), d2dBrush.PlatformBrush, (float)pen.Thickness, d2dStroke);
                     }
                 }
+                return;
             }
+
+            if (!SolidRectBatch.IsFullyOpaque(solid))
+            {
+                FlushLineBatch();
+                var fill = _deviceResources.GetOrCreateSolidBrush(_deviceContext, solid.Color, solid.Opacity);
+                var style = GetOrCreateStrokeStyle(pen);
+                if (fill.PlatformBrush is not null)
+                {
+                    if (style is null)
+                        _deviceContext.DrawLine(p1.ToVortice(), p2.ToVortice(), fill.PlatformBrush, (float)pen.Thickness);
+                    else
+                        _deviceContext.DrawLine(p1.ToVortice(), p2.ToVortice(), fill.PlatformBrush, (float)pen.Thickness, style);
+                }
+                return;
+            }
+
+            var thickness = (float)pen.Thickness;
+            var strokeStyle = GetOrCreateStrokeStyle(pen);
+            if (_lineBatchActive
+                && (!ColorEquals(_lineBatchColor, solid.Color)
+                    || Math.Abs(_lineBatchOpacity - solid.Opacity) > 0.0001
+                    || Math.Abs(_lineBatchThickness - thickness) > 0.0001
+                    || !ReferenceEquals(_lineBatchStyle, strokeStyle)))
+            {
+                FlushLineBatch();
+            }
+
+            if (!_lineBatchActive)
+            {
+                _lineBatchColor = solid.Color;
+                _lineBatchOpacity = solid.Opacity;
+                _lineBatchThickness = thickness;
+                _lineBatchStyle = strokeStyle;
+                _lineBatchActive = true;
+            }
+
+            _lineBatch.Add((p1, p2));
         }
+
+        private static bool ColorEquals(Color a, Color b)
+            => a.A == b.A && a.R == b.R && a.G == b.G && a.B == b.B;
 
         /// <summary>
         /// Draws a geometry.
@@ -758,8 +954,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (solidFill is null && solidStroke is null)
                 return false;
 
-            // Translucent solids: keep immediate ordered path (no batch / no CL).
-            if (solidFill is { Opacity: < 0.999 } || solidStroke is { Opacity: < 0.999 })
+            // Translucent solids (opacity or Color.A): keep immediate ordered path (no batch / no CL).
+            if (!SolidRectBatch.IsFullyOpaque(solidFill) || !SolidRectBatch.IsFullyOpaque(solidStroke))
                 return false;
 
             FlushDeferredClip();
@@ -851,40 +1047,69 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <inheritdoc />
         public void DrawEllipse(IBrush? brush, IPen? pen, Rect rect)
         {
-            FlushPrimitiveBatch();
+            // End solid-rect CL session; ellipse strokes can still multi-batch.
+            if (_solidRectBatch.IsDeferredSimpleSession || _solidRectBatch.HasDeferredStrokes)
+                _solidRectBatch.MarkNonSimple(_deviceContext, _deviceResources);
+            FlushLineBatch();
             FlushDeferredClip();
-            var rc = rect.ToDirect2D();
 
-            if (brush != null)
+            var ellipse = new Ellipse
             {
-                using (var b = CreateBrush(brush, rect))
-                {
-                    if (b.PlatformBrush != null)
-                    {
-                        _deviceContext.FillEllipse(new Ellipse
-                        {
-                            Point = rect.Center.ToVortice(),
-                            RadiusX = (float)(rect.Width / 2),
-                            RadiusY = (float)(rect.Height / 2)
-                        }, b.PlatformBrush);
-                    }
-                }
+                Point = rect.Center.ToVortice(),
+                RadiusX = (float)(rect.Width / 2),
+                RadiusY = (float)(rect.Height / 2)
+            };
+
+            if (brush is ISolidColorBrush solidFill && SolidRectBatch.IsFullyOpaque(solidFill))
+            {
+                var fill = _deviceResources.GetOrCreateSolidBrush(
+                    _deviceContext, solidFill.Color, solidFill.Opacity);
+                if (fill.PlatformBrush is not null)
+                    _deviceContext.FillEllipse(ellipse, fill.PlatformBrush);
+            }
+            else if (brush != null)
+            {
+                FlushEllipseStrokeBatch();
+                using var b = CreateBrush(brush, rect);
+                if (b.PlatformBrush != null)
+                    _deviceContext.FillEllipse(ellipse, b.PlatformBrush);
             }
 
-            if (pen?.Brush != null)
+            if (pen?.Brush is ISolidColorBrush solidStroke && pen.Thickness > 0 && SolidRectBatch.IsFullyOpaque(solidStroke))
             {
-                using (var wrapper = CreateBrush(pen.Brush, rect))
+                var thickness = (float)pen.Thickness;
+                var style = GetOrCreateStrokeStyle(pen);
+                if (_ellipseStrokeBatchActive
+                    && (!ColorEquals(_ellipseStrokeColor, solidStroke.Color)
+                        || Math.Abs(_ellipseStrokeOpacity - solidStroke.Opacity) > 0.0001
+                        || Math.Abs(_ellipseStrokeThickness - thickness) > 0.0001
+                        || !ReferenceEquals(_ellipseStrokeStyle, style)))
                 {
-                    var d2dStroke = GetOrCreateStrokeStyle(pen);
-                    if (wrapper.PlatformBrush != null)
-                    {
-                        _deviceContext.DrawEllipse(new Ellipse
-                        {
-                            Point = rect.Center.ToVortice(),
-                            RadiusX = (float)(rect.Width / 2),
-                            RadiusY = (float)(rect.Height / 2)
-                        }, wrapper.PlatformBrush, (float)pen.Thickness, d2dStroke);
-                    }
+                    FlushEllipseStrokeBatch();
+                }
+
+                if (!_ellipseStrokeBatchActive)
+                {
+                    _ellipseStrokeColor = solidStroke.Color;
+                    _ellipseStrokeOpacity = solidStroke.Opacity;
+                    _ellipseStrokeThickness = thickness;
+                    _ellipseStrokeStyle = style;
+                    _ellipseStrokeBatchActive = true;
+                }
+
+                _ellipseStrokeBatch.Add(ellipse);
+            }
+            else if (pen?.Brush != null)
+            {
+                FlushEllipseStrokeBatch();
+                using var wrapper = CreateBrush(pen.Brush, rect);
+                var d2dStroke = GetOrCreateStrokeStyle(pen);
+                if (wrapper.PlatformBrush != null)
+                {
+                    if (d2dStroke is null)
+                        _deviceContext.DrawEllipse(ellipse, wrapper.PlatformBrush, (float)pen.Thickness);
+                    else
+                        _deviceContext.DrawEllipse(ellipse, wrapper.PlatformBrush, (float)pen.Thickness, d2dStroke);
                 }
             }
         }
