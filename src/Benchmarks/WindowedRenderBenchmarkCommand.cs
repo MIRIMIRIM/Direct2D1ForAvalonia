@@ -30,7 +30,127 @@ internal static class WindowedRenderBenchmarkCommand
     public static int Run(string[] args)
     {
         var options = WindowedBenchmarkOptions.Parse(args);
-        var scene = RenderBenchmarkScenes.Get(options.Scene);
+        var scenes = options.Scenes.Count > 0
+            ? options.Scenes
+            : new List<string> { options.Scene };
+
+        // Multi-scene matrix: run each scene in its own process-style AppBuilder pass so
+        // composition/device state stays isolated. Emits a compare table + per-scene JSON.
+        if (scenes.Count > 1)
+            return RunMatrix(args, options, scenes);
+
+        return RunOne(options, scenes[0]);
+    }
+
+    static int RunMatrix(string[] args, WindowedBenchmarkOptions template, List<string> scenes)
+    {
+        // Avalonia Setup can only run once per process — spawn a worker per scene.
+        var rows = new List<WindowedBenchmarkReport>();
+        var worst = 0;
+        var outDir = Path.GetDirectoryName(Path.GetFullPath(
+            template.OutputJson ?? Path.Combine("artifacts", "render-bench", "windowed-matrix.json")))
+            ?? Path.Combine("artifacts", "render-bench");
+        Directory.CreateDirectory(outDir);
+
+        foreach (var scene in scenes)
+        {
+            var sceneJson = Path.Combine(outDir, $"windowed-{scene.ToLowerInvariant()}-matrix-part.json");
+            var code = RunWindowedWorkerProcess(template, scene, sceneJson);
+            if (code != 0)
+            {
+                worst = code;
+                Console.Error.WriteLine($"Windowed worker for {scene} exited {code}.");
+                continue;
+            }
+
+            if (!File.Exists(sceneJson))
+            {
+                Console.Error.WriteLine($"Missing worker JSON for {scene}: {sceneJson}");
+                worst = worst == 0 ? 2 : worst;
+                continue;
+            }
+
+            var report = JsonSerializer.Deserialize<WindowedBenchmarkReport>(File.ReadAllText(sceneJson));
+            if (report is null)
+            {
+                Console.Error.WriteLine($"Failed to parse worker JSON for {scene}.");
+                worst = worst == 0 ? 2 : worst;
+                continue;
+            }
+
+            rows.Add(report);
+            Console.WriteLine(
+                $"  [{scene}] off/iter={report.Offscreen.PerIterationMs:0.###}ms  " +
+                $"session={report.Windowed.MedianSessionTotalMs:0.###}ms  " +
+                $"wall={report.Windowed.WallMedianFrameMs:0.###}ms  " +
+                $"sess/off={(report.Offscreen.PerIterationMs > 0 ? report.Windowed.MedianSessionTotalMs / report.Offscreen.PerIterationMs : 0):0.###}x");
+        }
+
+        PrintMatrix(rows);
+        var matrixPath = template.OutputJson
+            ?? Path.Combine(outDir, "windowed-matrix.json");
+        File.WriteAllText(
+            matrixPath,
+            JsonSerializer.Serialize(rows, new JsonSerializerOptions { WriteIndented = true }));
+        Console.WriteLine();
+        Console.WriteLine($"matrix-json={Path.GetFullPath(matrixPath)}");
+        return worst;
+    }
+
+    static int RunWindowedWorkerProcess(WindowedBenchmarkOptions template, string scene, string jsonPath)
+    {
+        var exePath = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Cannot resolve process path.");
+
+        var psi = new ProcessStartInfo(exePath)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        psi.ArgumentList.Add("--bench-windowed");
+        psi.ArgumentList.Add("--scene");
+        psi.ArgumentList.Add(scene);
+        psi.ArgumentList.Add("--warmup");
+        psi.ArgumentList.Add(template.WarmupFrames.ToString());
+        psi.ArgumentList.Add("--frames");
+        psi.ArgumentList.Add(template.MeasureFrames.ToString());
+        // Let each worker resolve scene-default iterations (matrix first-scene default is wrong).
+        psi.ArgumentList.Add("--offscreen-repeats");
+        psi.ArgumentList.Add(template.OffscreenRepeats.ToString());
+        psi.ArgumentList.Add("--timeout");
+        psi.ArgumentList.Add(template.TimeoutSeconds.ToString());
+        psi.ArgumentList.Add("--stress-copies");
+        psi.ArgumentList.Add(template.StressCopies.ToString());
+        psi.ArgumentList.Add("--visual-tree-grid");
+        psi.ArgumentList.Add(template.VisualTreeGrid.ToString());
+        if (template.CompositionMode is { } composition)
+        {
+            psi.ArgumentList.Add("--composition");
+            psi.ArgumentList.Add(composition.ToString());
+        }
+        if (template.RenderOnUiThread)
+            psi.ArgumentList.Add("--render-on-ui-thread");
+        psi.ArgumentList.Add("--json");
+        psi.ArgumentList.Add(jsonPath);
+
+        using var process = Process.Start(psi)
+            ?? throw new InvalidOperationException($"Failed to start windowed worker for {scene}.");
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+            Console.Error.WriteLine(stderr.Length > 0 ? stderr : stdout);
+        else if (stdout.Length > 0)
+            Console.WriteLine(stdout);
+        return process.ExitCode;
+    }
+
+    static int RunOne(WindowedBenchmarkOptions options, string sceneName, List<WindowedBenchmarkReport>? capture = null)
+    {
+        var scene = RenderBenchmarkScenes.Get(sceneName);
+        // Keep options.Scene in sync for WindowedBenchApp title / report.
+        options = options with { Scene = scene.Name };
 
         WindowedBenchState? state = null;
         OffscreenResult? offscreen = null;
@@ -85,7 +205,7 @@ internal static class WindowedRenderBenchmarkCommand
 
         if (state is null || offscreen is null)
         {
-            Console.Error.WriteLine("Windowed bench did not produce a result state.");
+            Console.Error.WriteLine($"Windowed bench did not produce a result state for {sceneName}.");
             return exitCode != 0 ? exitCode : 2;
         }
 
@@ -130,6 +250,8 @@ internal static class WindowedRenderBenchmarkCommand
                 globals.SessionsByTarget.Select(static kv => $"{kv.Key}={kv.Value}").ToArray(),
                 globals.DrawByTarget.Select(static kv => $"{kv.Key}={kv.Value}").ToArray(),
                 globals.SoftByTarget.Select(static kv => $"{kv.Key}={kv.Value}").ToArray()));
+
+        capture?.Add(report);
 
         var json = JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true });
         var modeTag = options.VisualTreeGrid > 1 ? $"grid{options.VisualTreeGrid}" : $"x{options.StressCopies}";
@@ -278,6 +400,52 @@ internal static class WindowedRenderBenchmarkCommand
             Console.WriteLine(
                 $"    → Soft path active (process softHits={globals.SoftHits}, " +
                 $"surface softHits/frame≈{phases.MeanSoftHits:0.#}).");
+        }
+
+        // Explicit offscreen vs window diagnostic ratios (decision aid for next optimisations).
+        var offPer = report.Offscreen.PerIterationMs;
+        Console.WriteLine();
+        Console.WriteLine("  Offscreen vs window ratios (stressCopies matched on both sides):");
+        if (offPer > 0)
+        {
+            Console.WriteLine(
+                $"    session/offscreen-per-iter = {session / offPer:0.###}x  " +
+                $"(1.0 ≈ same draw cost; ≫1 → composition/Present overhead or vsync wait in session)");
+            Console.WriteLine(
+                $"    wall/offscreen-per-iter    = {wall / offPer:0.###}x  " +
+                $"(≫1 expected under vsync; compare session ratio for real work)");
+            if (session / offPer > 2.0 && session > 1.0)
+                Console.WriteLine(
+                    "    → Window session is much slower than offscreen: investigate composition " +
+                    "intermediates, CreateLayer, or Present path — not offscreen-only draw opts.");
+            else if (session / offPer < 1.5)
+                Console.WriteLine(
+                    "    → Window session ≈ offscreen: further wins are mostly draw-primitive work.");
+        }
+    }
+
+    static void PrintMatrix(List<WindowedBenchmarkReport> rows)
+    {
+        Console.WriteLine();
+        Console.WriteLine("Windowed matrix — offscreen vs window session (decision table)");
+        Console.WriteLine(new string('-', 100));
+        Console.WriteLine(
+            $"  {"Scene",-18} {"Off/iter",8} {"Sess",8} {"Wall",8} {"Sess/Off",9} {"Wall/Off",9}  note");
+        Console.WriteLine(new string('-', 100));
+        foreach (var r in rows)
+        {
+            var off = r.Offscreen.PerIterationMs;
+            var sess = r.Windowed.MedianSessionTotalMs;
+            var wall = r.Windowed.WallMedianFrameMs;
+            var sOff = off > 0 ? sess / off : 0;
+            var wOff = off > 0 ? wall / off : 0;
+            var note = sOff > 2.0 && sess > 1.0
+                ? "composition-heavy"
+                : sOff < 1.5
+                    ? "draw-bound"
+                    : "mixed";
+            Console.WriteLine(
+                $"  {r.Scene,-18} {off,8:0.###} {sess,8:0.###} {wall,8:0.###} {sOff,9:0.###} {wOff,9:0.###}  {note}");
         }
     }
 }
@@ -581,11 +749,13 @@ internal sealed record WindowedBenchmarkOptions(
     int VisualTreeGrid,
     Win32CompositionMode? CompositionMode,
     bool RenderOnUiThread,
-    string? OutputJson)
+    string? OutputJson,
+    List<string> Scenes)
 {
     public static WindowedBenchmarkOptions Parse(string[] args)
     {
         var scene = "ClipLayerHeavy";
+        var scenes = new List<string>();
         var warmup = 30;
         var measure = 120;
         int? offscreenIterations = null;
@@ -612,8 +782,21 @@ internal sealed record WindowedBenchmarkOptions(
                 case "--bench-windowed":
                     break;
                 case "--scene":
-                    scene = Next();
+                {
+                    var value = Next();
+                    if (string.Equals(value, "all", StringComparison.OrdinalIgnoreCase))
+                    {
+                        scenes.AddRange(RenderBenchmarkScenes.All.Select(static s => s.Name));
+                        scene = scenes[0];
+                    }
+                    else
+                    {
+                        foreach (var part in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                            scenes.Add(part);
+                        scene = scenes[0];
+                    }
                     break;
+                }
                 case "--warmup":
                     warmup = int.Parse(Next());
                     break;
@@ -662,6 +845,10 @@ internal sealed record WindowedBenchmarkOptions(
         }
 
         var resolvedScene = RenderBenchmarkScenes.Get(scene);
+        // Validate every listed scene early.
+        foreach (var s in scenes)
+            _ = RenderBenchmarkScenes.Get(s);
+
         return new WindowedBenchmarkOptions(
             resolvedScene.Name,
             warmup,
@@ -673,6 +860,7 @@ internal sealed record WindowedBenchmarkOptions(
             visualTreeGrid,
             compositionMode,
             renderOnUiThread,
-            outputJson);
+            outputJson,
+            scenes);
     }
 }

@@ -238,7 +238,10 @@ namespace MIR.Direct2D1ForAvalonia
             public IDrawingContextLayerImpl CreateOffscreenRenderTarget(PixelSize pixelSize, Vector scaling, bool enableTextAntialiasing)
             {
                 var dpi = scaling * 96.0;
-                return new WicRenderTargetBitmapImpl(pixelSize, dpi);
+                // Prefer a device-compatible GPU intermediate (same D2D device as window surfaces).
+                // WIC/CPU was a silent footgun: main window could be GPU while composition/offscreen
+                // layers still rasterised on the CPU. RenderTargetBitmap still uses WIC explicitly.
+                return D2DGpuOffscreenFactory.Create(pixelSize, dpi);
             }
 
             public void Dispose()
