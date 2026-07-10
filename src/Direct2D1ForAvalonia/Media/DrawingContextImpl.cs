@@ -28,41 +28,56 @@ namespace MIR.Direct2D1ForAvalonia.Media
         private readonly ID2D1DeviceContext _deviceContext;
         private readonly bool _ownsDeviceContext;
         private readonly IDXGISwapChain1? _swapChain;
-        private readonly Action? _finishedCallback;
-        private readonly Action? _cleanupCallback;
+        private Action? _finishedCallback;
+        private Action? _cleanupCallback;
         private readonly string _diagnosticTargetName;
+        // True while BeginDraw has been called and EndDraw has not. Allows the same instance
+        // to be reopened across frames (see ReopenSession) without reallocating stacks/caches.
+        private bool _sessionOpen;
+        // When true, Dispose ends a session but keeps the (possibly QI'd) device context alive
+        // for ReopenSession. Hosts that pool DrawingContextImpl must set this before first Dispose.
+        private bool _retainAcrossSessions;
 
         private readonly Stack<RenderOptions> _renderOptionsStack = new Stack<RenderOptions>();
         private readonly Stack<TextOptions> _textOptionsStack = new Stack<TextOptions>();
-        private readonly Stack<ID2D1Layer?> _layers = new Stack<ID2D1Layer?>();
+        // true = a real D2D layer was pushed (needs PopLayer); false = no-op push (e.g. opacity >= 1).
+        // Layer resources themselves are managed by Direct2D: PushLayer(..., null) is the D2D 1.1+
+        // recommended path and avoids CreateLayer + a short-lived per-frame pool.
+        private readonly Stack<bool> _layerPushed = new Stack<bool>();
         private readonly Stack<BrushImpl?> _opacityMaskBrushes = new Stack<BrushImpl?>();
-        private readonly Stack<ID2D1Layer> _layerPool = new Stack<ID2D1Layer>();
         private readonly Stack<BitmapBlendingMode> _bitmapBlendModeStack = new Stack<BitmapBlendingMode>();
-        // For each PushClip, records the kind of clip pushed so PopClip can undo the right one.
-        // When the entry is a non-null geometry, the clip was a rounded-rect layer whose
-        // geometric mask must outlive the layer and be disposed alongside it on PopClip.
-        private readonly Stack<ID2D1Geometry?> _clipKindStack = new Stack<ID2D1Geometry?>();
+        // For each PushClip, records how PopClip should undo it and owns any geometric mask.
+        // Deferred rounded clips may be merged with a following PushOpacity into a single layer,
+        // or kept as a soft-clip (no D2D layer) when subsequent draws can bake clip+opacity.
+        private readonly Stack<ClipEntry> _clipStack = new Stack<ClipEntry>();
+        // Number of soft-merged opacities that did not push a D2D layer (PopOpacity is a no-op).
+        private int _softOpacityDepth;
+        // Standalone soft opacity (no rounded clip): bake into solid fills/simple pens.
+        // null = none deferred. Converted to a real layer on incompatible draws.
+        private float? _standaloneSoftOpacity;
+        // Lightweight counters for offscreen vs real-window profiling (reset each session).
+        private int _softPathHits;
+        private int _softPathMisses;
+        private int _layerPushes;
+        private int _deferredClipFlushes;
+        private int _pushClips;
+        private int _pushOpacities;
+        private int _drawRectangles;
         private static readonly PropertyInfo? s_imageBrushBitmapProperty = typeof(IImageBrushSource).GetProperty(
             "Bitmap",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly PropertyInfo? s_imageBrushBitmapItemProperty = s_imageBrushBitmapProperty?.PropertyType.GetProperty(
             "Item",
             BindingFlags.Instance | BindingFlags.Public);
-        // Cache of solid-color brushes keyed by (color, opacity), reused across draw calls within
-        // a single DrawingContextImpl lifetime (i.e. one frame). Each entry owns its D2D brush;
-        // BrushImpl.IsCached prevents consumers from disposing it prematurely.
-        private readonly Dictionary<SolidBrushKey, SolidColorBrushImpl> _solidBrushCache = new();
-        // Cache of D2D stroke styles keyed by pen properties. Stroke styles are immutable device
-        // resources — the same pen produces the same ID2D1StrokeStyle every time, so caching avoids
-        // a COM allocation per stroked draw call.
-        private readonly Dictionary<StrokeStyleKey, ID2D1StrokeStyle> _strokeStyleCache = new();
+        // Solid brushes and stroke styles live on D2DDeviceResourceCache (render-target lifetime)
+        // so they survive across frames. See GetOrCreateSolidBrush / GetOrCreateStrokeStyle.
         // Cross-frame device-resource cache keyed on the render target. Used for gradient stop
         // collections, which depend only on stops+spread (not geometry) and so recur every frame.
         private readonly D2DDeviceResourceCache _deviceResources;
         private RenderOptions _renderOptions;
         private TextOptions _textOptions;
         private readonly Matrix? _postTransform;
-        private readonly Matrix? _targetTransform;
+        private Matrix? _targetTransform;
         private Matrix _transform = Matrix.Identity;
 
         /// <summary>
@@ -93,7 +108,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
             _finishedCallback = finishedCallback;
             _targetTransform = targetTransform;
             _cleanupCallback = cleanupCallback;
-            _diagnosticTargetName = _renderTarget.GetType().Name;
+            // Prefer the Avalonia host (window texture / bitmap impl) over the raw D2D RCW type so
+            // process-wide call stats can distinguish window surface vs intermediate targets.
+            _diagnosticTargetName = layerFactory?.GetType().Name
+                ?? (_swapChain is not null ? "SwapChain" : _renderTarget.GetType().Name);
             _deviceResources = D2DDeviceResourceCache.For(_renderTarget);
 
             if (_renderTarget is ID2D1DeviceContext deviceContext)
@@ -124,12 +142,73 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     $"postTransform={_postTransform?.ToString() ?? "null"} targetTransform={_targetTransform?.ToString() ?? "null"}");
             }
 
+            OpenSession();
+        }
+
+        /// <summary>
+        /// Marks this instance as pooled: session <see cref="Dispose"/> will not release a QI'd
+        /// device context so <see cref="ReopenSession"/> can call BeginDraw again.
+        /// Must be called before the first session Dispose.
+        /// </summary>
+        internal void EnableSessionReuse() => _retainAcrossSessions = true;
+
+        /// <summary>
+        /// Reopens a previously disposed drawing context for another frame on the same device
+        /// context. Avoids reallocating per-frame stacks and re-resolving device resource caches.
+        /// </summary>
+        internal void ReopenSession(
+            Action? finishedCallback = null,
+            Action? cleanupCallback = null,
+            Matrix? targetTransform = null)
+        {
+            if (_sessionOpen)
+                throw new InvalidOperationException("Drawing context session is already open.");
+
+            _retainAcrossSessions = true;
+
+            // Defensive: a reused context must not carry clip/layer state across frames.
+            if (_clipStack.Count != 0 || _layerPushed.Count != 0 || _softOpacityDepth != 0
+                || _standaloneSoftOpacity is not null
+                || _opacityMaskBrushes.Count != 0 || _bitmapBlendModeStack.Count != 0
+                || _renderOptionsStack.Count != 0 || _textOptionsStack.Count != 0)
+            {
+                throw new InvalidOperationException("Drawing context still has pushed state from a previous frame.");
+            }
+
+            _finishedCallback = finishedCallback;
+            _cleanupCallback = cleanupCallback;
+            _targetTransform = targetTransform;
+            _transform = Matrix.Identity;
+            _renderOptions = default;
+            _textOptions = default;
+            OpenSession();
+        }
+
+        /// <summary>
+        /// Soft-path / layer counters for the current (or last completed) session.
+        /// Used by diagnostics and windowed profiling — not part of the public API.
+        /// </summary>
+        internal (int SoftHits, int SoftMisses, int LayerPushes, int DeferredFlushes, int PushClips, int PushOpacities, int DrawRectangles) SessionCounters
+            => (_softPathHits, _softPathMisses, _layerPushes, _deferredClipFlushes, _pushClips, _pushOpacities, _drawRectangles);
+
+        private void OpenSession()
+        {
+            _sessionOpen = true;
+            _softPathHits = 0;
+            _softPathMisses = 0;
+            _layerPushes = 0;
+            _deferredClipFlushes = 0;
+            _pushClips = 0;
+            _pushOpacities = 0;
+            _drawRectangles = 0;
+            DrawingContextCallStats.OnSessionOpen(_diagnosticTargetName);
             _deviceContext.BeginDraw();
 
-            if (_targetTransform.HasValue)
-            {
+            // Reset world transform so a reused context never inherits the previous frame's matrix.
+            if (_targetTransform.HasValue || _postTransform.HasValue)
                 ApplyTransform();
-            }
+            else
+                _deviceContext.Transform = Matrix3x2.Identity;
         }
 
         /// <summary>
@@ -140,6 +219,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
             get { return _transform; }
             set
             {
+                FlushDeferredClip();
                 _transform = value;
                 ApplyTransform();
             }
@@ -164,6 +244,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <inheritdoc/>
         public void Clear(Color color)
         {
+            FlushDeferredClip();
             _deviceContext.Clear(color.ToDirect2D());
         }
 
@@ -172,18 +253,30 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// </summary>
         public void Dispose()
         {
-            foreach (var layer in _layerPool)
-            {
-                layer.Dispose();
-            }
+            // Ending a reusable session is idempotent: a second Dispose after ReopenSession has
+            // not been called is a no-op (matches Avalonia's using-per-frame pattern).
+            if (!_sessionOpen)
+                return;
 
-            // Clean up any rounded-rect clip geometries left behind by a PushClip without a
-            // matching PopClip (e.g. render aborted mid-frame).
-            foreach (var clipGeometry in _clipKindStack)
+            // Release clip geometries left behind by unmatched PushClip. Actual D2D layers
+            // are balanced via _layerPushed below. Shared (cached) geometries stay in the cache.
+            while (_clipStack.Count > 0)
             {
-                clipGeometry?.Dispose();
+                ReleaseClipGeometry(_clipStack.Pop());
             }
-            _clipKindStack.Clear();
+            _softOpacityDepth = 0;
+            _standaloneSoftOpacity = null;
+
+            // Balance any unmatched PushLayer before EndDraw. D2D owns the layer resources when
+            // PushLayer is called with a null layer, so there is nothing for us to dispose.
+            while (_layerPushed.Count > 0)
+            {
+                if (_layerPushed.Pop())
+                {
+                    try { _deviceContext.PopLayer(); }
+                    catch { /* best-effort during teardown */ }
+                }
+            }
 
             try
             {
@@ -193,7 +286,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
                         $"drawing-context-dispose begin target={_diagnosticTargetName} hasSwapChain={_swapChain != null} hasFinishedCallback={_finishedCallback != null} hasCleanupCallback={_cleanupCallback != null}");
                 }
 
+                Direct2D1FrameProfiler.MarkEndDrawStart(
+                    _softPathHits, _softPathMisses, _layerPushes, _deferredClipFlushes,
+                    _pushClips, _pushOpacities, _drawRectangles);
                 _deviceContext.EndDraw().CheckError();
+                Direct2D1FrameProfiler.MarkEndDrawDone();
                 if (Direct2D1Diagnostics.IsEnabled)
                     Direct2D1Diagnostics.Write($"drawing-context-dispose enddraw target={_diagnosticTargetName}");
 
@@ -230,36 +327,26 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 }
                 finally
                 {
-                    // Drain any layers/masks left pushed by a render that aborted before matching
-                    // pops (e.g. an exception between PushOpacity/OpacityMask and its pop). Layers
-                    // here are still live RCWs (the pool only holds returned ones), and mask brushes
-                    // own their own D2D brush, so dispose both before tearing down the device.
-                    foreach (var layer in _layers)
-                    {
-                        layer?.Dispose();
-                    }
-                    _layers.Clear();
-
+                    // Drain any opacity-mask brushes left pushed by a render that aborted before
+                    // matching pops. Layer resources are owned by Direct2D when PushLayer is
+                    // called with a null layer, and unmatched pushes are popped above.
                     foreach (var maskBrush in _opacityMaskBrushes)
                     {
                         maskBrush?.Dispose();
                     }
                     _opacityMaskBrushes.Clear();
 
-                    foreach (var cachedBrush in _solidBrushCache.Values)
-                    {
-                        cachedBrush.IsCached = false;
-                        cachedBrush.Dispose();
-                    }
-                    _solidBrushCache.Clear();
+                    // Solid brushes / stroke styles are owned by D2DDeviceResourceCache and must
+                    // not be disposed with the per-frame drawing context.
 
-                    foreach (var cachedStroke in _strokeStyleCache.Values)
-                    {
-                        cachedStroke.Dispose();
-                    }
-                    _strokeStyleCache.Clear();
+                    // Mark the session closed so the instance can be reopened.
+                    _sessionOpen = false;
+                    _finishedCallback = null;
+                    _cleanupCallback = null;
 
-                    if (_ownsDeviceContext)
+                    // Owned QI'd device contexts (WIC RT → ID2D1DeviceContext) must survive
+                    // across ReopenSession. One-shot contexts still release on session end.
+                    if (_ownsDeviceContext && !_retainAcrossSessions)
                     {
                         _deviceContext.Dispose();
                     }
@@ -293,6 +380,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="destRect">The rect in the output to draw to.</param>
         public void DrawBitmap(IBitmapImpl source, double opacity, Rect sourceRect, Rect destRect)
         {
+            FlushDeferredClip();
             if (EffectiveBitmapBlendingMode == BitmapBlendingMode.Destination)
                 return;
 
@@ -406,6 +494,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="destRect">The rect in the output to draw to.</param>
         public void DrawBitmap(IBitmapImpl source, IBrush opacityMask, Rect opacityMaskRect, Rect destRect)
         {
+            FlushDeferredClip();
             var interpolationMode = GetInterpolationMode(RenderOptions.BitmapInterpolationMode);
 
             using (var d2dSource = ((BitmapImpl)source).GetDirect2DBitmap(_deviceContext))
@@ -433,6 +522,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="p2">The second point of the line.</param>
         public void DrawLine(IPen? pen, Point p1, Point p2)
         {
+            FlushDeferredClip();
             if (pen?.Brush != null)
             {
                 var bounds = new Rect(p1, p2);
@@ -461,6 +551,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="geometry">The geometry.</param>
         public void DrawGeometry(IBrush? brush, IPen? pen, IGeometryImpl geometry)
         {
+            FlushDeferredClip();
             if (brush != null)
             {
                 using (var d2dBrush = CreateBrush(brush, geometry.Bounds))
@@ -490,6 +581,18 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <inheritdoc />
         public void DrawRectangle(IBrush? brush, IPen? pen, RoundedRect rrect, BoxShadows boxShadow = default)
         {
+            _drawRectangles++;
+            DrawingContextCallStats.OnDrawRectangle(_diagnosticTargetName);
+            if (TryDrawRectangleWithSoftClip(brush, pen, rrect, boxShadow))
+                return;
+
+            // Hot path for UI chrome: solid fill and/or solid stroke, uniform rounded (or axis-
+            // aligned) rect, no shadows, no deferred clip. Avoids CreateBrush type-switch and
+            // default stroke-style COM when the pen matches D2D defaults.
+            if (TryDrawSimpleSolidRectangle(brush, pen, rrect, boxShadow))
+                return;
+
+            FlushDeferredClip();
             var rc = rrect.Rect.ToDirect2D();
             var rect = rrect.Rect;
             var radiusX = Math.Max(rrect.RadiiTopLeft.X,
@@ -560,36 +663,148 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     var d2dStroke = GetOrCreateStrokeStyle(pen);
                     if (wrapper.PlatformBrush != null)
                     {
+                        var thickness = (float)pen.Thickness;
                         if (isRounded)
                         {
                             if (uniformRadius)
                             {
-                                _deviceContext.DrawRoundedRectangle(
-                                    d2dRoundedRect,
-                                    wrapper.PlatformBrush,
-                                    (float)pen.Thickness,
-                                    d2dStroke!);
+                                if (d2dStroke is null)
+                                    _deviceContext.DrawRoundedRectangle(d2dRoundedRect, wrapper.PlatformBrush, thickness);
+                                else
+                                    _deviceContext.DrawRoundedRectangle(d2dRoundedRect, wrapper.PlatformBrush, thickness, d2dStroke);
                             }
+                            else if (d2dStroke is null)
+                                _deviceContext.DrawGeometry(roundedGeometry!, wrapper.PlatformBrush, thickness);
                             else
-                            {
-                                _deviceContext.DrawGeometry(
-                                    roundedGeometry!,
-                                    wrapper.PlatformBrush,
-                                    (float)pen.Thickness,
-                                    d2dStroke);
-                            }
+                                _deviceContext.DrawGeometry(roundedGeometry!, wrapper.PlatformBrush, thickness, d2dStroke);
                         }
+                        else if (d2dStroke is null)
+                            _deviceContext.DrawRectangle(rc, wrapper.PlatformBrush, thickness);
                         else
-                        {
-                            _deviceContext.DrawRectangle(
-                                rc,
-                                wrapper.PlatformBrush,
-                                (float)pen.Thickness,
-                                d2dStroke);
-                        }
+                            _deviceContext.DrawRectangle(rc, wrapper.PlatformBrush, thickness, d2dStroke);
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Fast path for solid-color fill/stroke rectangles (axis-aligned or uniform rounded).
+        /// Covers RoundedRectGrid and typical chrome: no shadows, no active soft clip, solid brushes only.
+        /// </summary>
+        private bool TryDrawSimpleSolidRectangle(
+            IBrush? brush,
+            IPen? pen,
+            RoundedRect rrect,
+            BoxShadows boxShadow)
+        {
+            if (boxShadow != default)
+                return false;
+            // Soft clip / standalone soft opacity must go through the soft or full path.
+            if (_standaloneSoftOpacity is not null)
+                return false;
+            if (_clipStack.Count > 0)
+            {
+                var top = _clipStack.Peek().State;
+                if (top is ClipState.Deferred or ClipState.SoftMerged)
+                    return false; // soft path already tried and missed
+            }
+
+            ISolidColorBrush? solidFill = null;
+            if (brush is not null)
+            {
+                if (brush is not ISolidColorBrush sf)
+                    return false;
+                solidFill = sf;
+            }
+
+            ISolidColorBrush? solidStroke = null;
+            if (pen is not null)
+            {
+                if (pen.Brush is not ISolidColorBrush sp || pen.Thickness <= 0)
+                    return false;
+                solidStroke = sp;
+            }
+
+            if (solidFill is null && solidStroke is null)
+                return false;
+
+            FlushDeferredClip();
+
+            var rect = rrect.Rect;
+            var radiusX = Math.Max(rrect.RadiiTopLeft.X,
+                Math.Max(rrect.RadiiTopRight.X, Math.Max(rrect.RadiiBottomRight.X, rrect.RadiiBottomLeft.X)));
+            var radiusY = Math.Max(rrect.RadiiTopLeft.Y,
+                Math.Max(rrect.RadiiTopRight.Y, Math.Max(rrect.RadiiBottomRight.Y, rrect.RadiiBottomLeft.Y)));
+            var isRounded = !IsZero(radiusX) || !IsZero(radiusY);
+
+            if (isRounded)
+            {
+                if (!AreRadiiUniform(rrect)
+                    || 2 * radiusX > rect.Width + 0.0001
+                    || 2 * radiusY > rect.Height + 0.0001)
+                {
+                    return false; // non-uniform / clamp case → full path
+                }
+
+                var rounded = new RoundedRectangle
+                {
+                    Rect = rect.ToDirect2D(),
+                    RadiusX = (float)rrect.RadiiTopLeft.X,
+                    RadiusY = (float)rrect.RadiiTopLeft.Y
+                };
+
+                if (solidFill is not null)
+                {
+                    var fill = _deviceResources.GetOrCreateSolidBrush(
+                        _deviceContext, solidFill.Color, solidFill.Opacity);
+                    if (fill.PlatformBrush is not null)
+                        _deviceContext.FillRoundedRectangle(rounded, fill.PlatformBrush);
+                }
+
+                if (solidStroke is not null && pen is not null)
+                {
+                    var stroke = _deviceResources.GetOrCreateSolidBrush(
+                        _deviceContext, solidStroke.Color, solidStroke.Opacity);
+                    if (stroke.PlatformBrush is not null)
+                    {
+                        var thickness = (float)pen.Thickness;
+                        var style = GetOrCreateStrokeStyle(pen);
+                        if (style is null)
+                            _deviceContext.DrawRoundedRectangle(rounded, stroke.PlatformBrush, thickness);
+                        else
+                            _deviceContext.DrawRoundedRectangle(rounded, stroke.PlatformBrush, thickness, style);
+                    }
+                }
+
+                return true;
+            }
+
+            // Axis-aligned solid rect.
+            var rc = rect.ToDirect2D();
+            if (solidFill is not null)
+            {
+                var fill = _deviceResources.GetOrCreateSolidBrush(
+                    _deviceContext, solidFill.Color, solidFill.Opacity);
+                if (fill.PlatformBrush is not null)
+                    _deviceContext.FillRectangle(rc, fill.PlatformBrush);
+            }
+
+            if (solidStroke is not null && pen is not null)
+            {
+                var stroke = _deviceResources.GetOrCreateSolidBrush(
+                    _deviceContext, solidStroke.Color, solidStroke.Opacity);
+                if (stroke.PlatformBrush is not null)
+                {
+                    var thickness = (float)pen.Thickness;
+                    var style = GetOrCreateStrokeStyle(pen);
+                    if (style is null)
+                        _deviceContext.DrawRectangle(rc, stroke.PlatformBrush, thickness);
+                    else
+                        _deviceContext.DrawRectangle(rc, stroke.PlatformBrush, thickness, style);
+                }
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -608,6 +823,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void DrawRegion(IBrush? brush, IPen? pen, IPlatformRenderInterfaceRegion region)
         {
+            FlushDeferredClip();
             if (region.IsEmpty)
                 return;
 
@@ -648,6 +864,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <inheritdoc />
         public void DrawEllipse(IBrush? brush, IPen? pen, Rect rect)
         {
+            FlushDeferredClip();
             var rc = rect.ToDirect2D();
 
             if (brush != null)
@@ -691,6 +908,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="glyphRun">The glyph run.</param>
         public void DrawGlyphRun(IBrush? foreground, IGlyphRunImpl glyphRun)
         {
+            FlushDeferredClip();
             using (var brush = CreateBrush(foreground, glyphRun.Bounds))
             {
                 var immutableGlyphRun = (GlyphRunImpl)glyphRun;
@@ -753,12 +971,19 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <returns>A disposable used to undo the clip rectangle.</returns>
         public void PushClip(Rect clip)
         {
-            _clipKindStack.Push(null);
+            _pushClips++;
+            DrawingContextCallStats.OnPushClip();
+            FlushDeferredClip();
+            _clipStack.Push(ClipEntry.AxisAligned());
             _deviceContext.PushAxisAlignedClip(clip.ToVortice(), AntialiasMode.PerPrimitive);
         }
 
         public void PushClip(RoundedRect clip)
         {
+            _pushClips++;
+            DrawingContextCallStats.OnPushClip();
+            FlushDeferredClip();
+
             var radiusX = Math.Max(clip.RadiiTopLeft.X,
                 Math.Max(clip.RadiiTopRight.X, Math.Max(clip.RadiiBottomRight.X, clip.RadiiBottomLeft.X)));
             var radiusY = Math.Max(clip.RadiiTopLeft.Y,
@@ -767,36 +992,15 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (radiusX <= 0 || radiusY <= 0)
             {
                 // No rounding: a plain axis-aligned clip is cheaper and exactly equivalent.
-                _clipKindStack.Push(null);
+                _clipStack.Push(ClipEntry.AxisAligned());
                 _deviceContext.PushAxisAlignedClip(clip.Rect.ToDirect2D(), AntialiasMode.PerPrimitive);
                 return;
             }
 
-            // Direct2D has no native rounded-rect clip; push a layer whose geometric mask is
-            // a rounded-rectangle geometry so the clip honors the corner radii. The geometry
-            // must stay alive until PopClip, so it is tracked in the clip-kind stack.
-            var geometry = CreateRoundedRectGeometry(clip);
-
-            var parameters = new LayerParameters
-            {
-                ContentBounds = clip.Rect.ToDirect2D(),
-                MaskTransform = Matrix3x2.Identity,
-                Opacity = 1,
-                GeometricMask = geometry,
-                MaskAntialiasMode = AntialiasMode.PerPrimitive
-            };
-
-            try
-            {
-                PushDirect2DLayer(parameters);
-            }
-            catch
-            {
-                geometry.Dispose();
-                throw;
-            }
-
-            _clipKindStack.Push(geometry);
+            // Direct2D has no native rounded-rect clip. Defer both layer creation and geometry
+            // allocation: a following PushOpacity can soft-merge, and compatible solid fills can
+            // bake the clip with FillRoundedRectangle — never touching a D2D layer.
+            _clipStack.Push(ClipEntry.Deferred(clip, clip.Rect.ToDirect2D()));
         }
 
         private ID2D1Effect? CreateOpacityEffect(ID2D1Image source, float opacity)
@@ -810,8 +1014,22 @@ namespace MIR.Direct2D1ForAvalonia.Media
             return effect;
         }
 
-        private static ID2D1PathGeometry CreateRoundedRectGeometry(RoundedRect roundedRect)
+        private static ID2D1Geometry CreateRoundedRectGeometry(RoundedRect roundedRect)
         {
+            // Fast path: uniform corner radii map directly onto D2D's native rounded-rect
+            // geometry. Building a path geometry with four arcs is much more expensive and is
+            // unnecessary for the common Avalonia RoundedRect(rect, radius) form.
+            if (AreRadiiUniform(roundedRect))
+            {
+                var rounded = new RoundedRectangle
+                {
+                    Rect = roundedRect.Rect.ToDirect2D(),
+                    RadiusX = (float)roundedRect.RadiiTopLeft.X,
+                    RadiusY = (float)roundedRect.RadiiTopLeft.Y
+                };
+                return Direct2D1Platform.Direct2D1Factory.CreateRoundedRectangleGeometry(rounded);
+            }
+
             var geometry = Direct2D1Platform.Direct2D1Factory.CreatePathGeometry();
             try
             {
@@ -1174,12 +1392,16 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void PushClip(IPlatformRenderInterfaceRegion region)
         {
+            _pushClips++;
+            DrawingContextCallStats.OnPushClip();
             if (region is not Direct2DRegionImpl d2dRegion)
                 throw new InvalidOperationException("Region was not created by this Direct2D backend.");
 
+            FlushDeferredClip();
+
             if (region.IsEmpty)
             {
-                _clipKindStack.Push(null);
+                _clipStack.Push(ClipEntry.AxisAligned());
                 _deviceContext.PushAxisAlignedClip(default, AntialiasMode.PerPrimitive);
                 return;
             }
@@ -1204,25 +1426,47 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 throw;
             }
 
-            _clipKindStack.Push(geometry);
+            _clipStack.Push(ClipEntry.LayerOwned(geometry, ownsGeometry: true));
         }
 
         public void PopClip()
         {
-            var geometry = _clipKindStack.Pop();
-            if (geometry is null)
+            var entry = _clipStack.Pop();
+            switch (entry.State)
             {
-                _deviceContext.PopAxisAlignedClip();
-            }
-            else
-            {
-                PopLayer();
-                geometry.Dispose();
+                case ClipState.AxisAligned:
+                    _deviceContext.PopAxisAlignedClip();
+                    break;
+
+                case ClipState.LayerOwned:
+                    PopLayer();
+                    ReleaseClipGeometry(entry);
+                    break;
+
+                case ClipState.Deferred:
+                    // Never flushed to a layer (e.g. empty push/pop, or only nested no-ops).
+                    ReleaseClipGeometry(entry);
+                    break;
+
+                case ClipState.MergedIntoOpacity:
+                    // Combined layer was already popped by PopOpacity; only the mask remains.
+                    ReleaseClipGeometry(entry);
+                    break;
+
+                case ClipState.SoftMerged:
+                    // Soft clip never pushed a D2D layer; PopOpacity already cleared soft depth.
+                    ReleaseClipGeometry(entry);
+                    break;
+
+                default:
+                    ReleaseClipGeometry(entry);
+                    break;
             }
         }
 
         public void PushLayer(Rect bounds)
         {
+            FlushDeferredClip();
             var parameters = new LayerParameters
             {
                 ContentBounds = bounds.ToDirect2D(),
@@ -1234,6 +1478,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         void IDrawingContextImpl.PopLayer()
         {
+            FlushDeferredClip();
             PopLayer();
         }
 
@@ -1245,8 +1490,46 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <returns>A disposable used to undo the opacity.</returns>
         public void PushOpacity(double opacity, Rect? bounds)
         {
+            _pushOpacities++;
+            DrawingContextCallStats.OnPushOpacity();
+            // Soft-merge path: keep rounded clip + opacity as a soft clip (no D2D layer, no
+            // geometry allocation yet). Compatible solid fills bake clip+opacity via native
+            // FillRoundedRectangle. Incompatible draws flush to a real layer.
+            if (opacity < 1
+                && _clipStack.Count > 0
+                && _clipStack.Peek().State == ClipState.Deferred)
+            {
+                var deferred = _clipStack.Pop();
+                var contentBounds = deferred.ContentBounds;
+                if (bounds is { } opacityBounds && opacityBounds != default(Rect))
+                {
+                    var left = Math.Max(contentBounds.Left, (float)opacityBounds.X);
+                    var top = Math.Max(contentBounds.Top, (float)opacityBounds.Y);
+                    var right = Math.Min(contentBounds.Right, (float)opacityBounds.Right);
+                    var bottom = Math.Min(contentBounds.Bottom, (float)opacityBounds.Bottom);
+                    if (right > left && bottom > top)
+                        contentBounds = new RawRectF(left, top, right, bottom);
+                }
+
+                _clipStack.Push(ClipEntry.SoftMerged(deferred.ClipShape, contentBounds, (float)opacity));
+                _softOpacityDepth++;
+                return;
+            }
+
+            FlushDeferredClip();
+
             if (opacity < 1)
             {
+                // Standalone soft opacity (no rounded clip): bake into solid fills / simple pens.
+                // Nested standalone or soft-merged-active cases fall through to a real layer.
+                if (_standaloneSoftOpacity is null && _softOpacityDepth == 0)
+                {
+                    _standaloneSoftOpacity = (float)opacity;
+                    return;
+                }
+
+                FlushStandaloneSoftOpacity();
+
                 if (bounds == null || bounds == default(Rect))
                 {
                     bounds = new Rect(0, 0, _renderTarget.PixelSize.Width, _renderTarget.PixelSize.Height);
@@ -1266,11 +1549,24 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 PushDirect2DLayer(parameters);
             }
             else
-                _layers.Push(null);
+                _layerPushed.Push(false);
         }
 
         public void PopOpacity()
         {
+            // Standalone soft opacity closes without a D2D layer (unless flushed mid-scope).
+            if (_standaloneSoftOpacity is not null && _softOpacityDepth == 0)
+            {
+                _standaloneSoftOpacity = null;
+                return;
+            }
+
+            if (_softOpacityDepth > 0)
+            {
+                _softOpacityDepth--;
+                return;
+            }
+
             PopLayer();
         }
 
@@ -1300,49 +1596,465 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         private void PopLayer()
         {
-            var layer = _layers.Pop();
-            if (layer != null)
-            {
+            if (_layerPushed.Pop())
                 _deviceContext.PopLayer();
-                _layerPool.Push(layer);
-            }
         }
 
         private void PushDirect2DLayer(LayerParameters parameters)
         {
-            var layer = RentLayer(out var fromPool);
+            // Pass null for the layer resource so Direct2D manages it (D2D 1.1+ recommended path).
+            // Creating and pooling ID2D1Layer objects is a D2D 1.0-era pattern; GPU targets also
+            // reuse DrawingContextImpl across frames, so a short-lived per-frame layer pool would
+            // still not outlive the session that pushed it.
+            _deviceContext.PushLayer(parameters, null);
+            _layerPushed.Push(true);
+            _layerPushes++;
+            DrawingContextCallStats.OnLayerPush();
+        }
+
+        /// <summary>
+        /// Materialises a deferred rounded-rect clip into a real D2D layer. Called before any
+        /// draw/state change that is not an opacity merge candidate.
+        /// </summary>
+        private void FlushDeferredClip()
+        {
+            // Standalone soft opacity cannot stay deferred across a hard clip/layer boundary.
+            FlushStandaloneSoftOpacity();
+
+            if (_clipStack.Count == 0)
+                return;
+
+            var top = _clipStack.Peek();
+            if (top.State is not (ClipState.Deferred or ClipState.SoftMerged))
+                return;
+
+            _clipStack.Pop();
+            _deferredClipFlushes++;
+
+            // Soft-merged opacity was tracked via _softOpacityDepth (no D2D layer). Consuming it
+            // here means subsequent drawing will use a real layer; drop one soft depth so PopOpacity
+            // will not skip a real layer pop.
+            if (top.State == ClipState.SoftMerged && _softOpacityDepth > 0)
+                _softOpacityDepth--;
+
+            // Geometry is created lazily — soft path often never needs it.
+            var geometry = top.Geometry;
+            var ownsGeometry = top.OwnsGeometry;
+            if (geometry is null)
+            {
+                geometry = AcquireRoundedClipGeometry(top.ClipShape, out ownsGeometry);
+            }
+
+            var parameters = new LayerParameters
+            {
+                ContentBounds = top.ContentBounds,
+                MaskTransform = Matrix3x2.Identity,
+                Opacity = top.State == ClipState.SoftMerged ? top.Opacity : 1,
+                GeometricMask = geometry,
+                MaskAntialiasMode = AntialiasMode.PerPrimitive
+            };
+
             try
             {
-                _deviceContext.PushLayer(parameters, layer);
+                PushDirect2DLayer(parameters);
             }
             catch
             {
-                ReturnUnusedLayer(layer, fromPool);
+                if (ownsGeometry)
+                    geometry.Dispose();
                 throw;
             }
 
-            _layers.Push(layer);
+            if (top.State == ClipState.SoftMerged)
+                _clipStack.Push(ClipEntry.MergedIntoOpacity(geometry, ownsGeometry));
+            else
+                _clipStack.Push(ClipEntry.LayerOwned(geometry, ownsGeometry));
         }
 
-        private ID2D1Layer RentLayer(out bool fromPool)
+        /// <summary>
+        /// Converts a deferred standalone soft opacity into a real D2D opacity layer so subsequent
+        /// incompatible draws (or stack changes) remain correct. PopOpacity will PopLayer.
+        /// </summary>
+        private void FlushStandaloneSoftOpacity()
         {
-            if (_layerPool.Count != 0)
+            if (_standaloneSoftOpacity is not float opacity)
+                return;
+
+            _standaloneSoftOpacity = null;
+            var bounds = new Rect(0, 0, _renderTarget.PixelSize.Width, _renderTarget.PixelSize.Height);
+            var parameters = new LayerParameters
             {
-                fromPool = true;
-                return _layerPool.Pop();
+                MaskTransform = Matrix3x2.Identity,
+                Opacity = opacity,
+                ContentBounds = bounds.ToDirect2D()
+            };
+            PushDirect2DLayer(parameters);
+        }
+
+        /// <summary>
+        /// Soft clip / soft opacity: bake solid fills and simple solid pens without a D2D layer.
+        /// Uniform-radius shapes use native Fill/DrawRoundedRectangle (no geometry COM object).
+        /// </summary>
+        private bool TryDrawRectangleWithSoftClip(
+            IBrush? brush,
+            IPen? pen,
+            RoundedRect rrect,
+            BoxShadows boxShadow)
+        {
+            if (boxShadow != default)
+            {
+                _softPathMisses++;
+                DrawingContextCallStats.OnSoftMiss();
+                return false;
             }
 
-            fromPool = false;
-            return _deviceContext.CreateLayer();
+            var hasSoftClip = _clipStack.Count > 0
+                && _clipStack.Peek().State is ClipState.SoftMerged or ClipState.Deferred;
+            var hasStandaloneSoft = _standaloneSoftOpacity is not null;
+
+            if (!hasSoftClip && !hasStandaloneSoft)
+                return false;
+
+            // Soft path: solid fills and/or simple solid pens only.
+            ISolidColorBrush? solidFill = null;
+            if (brush is not null)
+            {
+                if (brush is not ISolidColorBrush fillSolid)
+                {
+                    _softPathMisses++;
+                    DrawingContextCallStats.OnSoftMiss();
+                    return false;
+                }
+                solidFill = fillSolid;
+            }
+
+            ISolidColorBrush? solidStroke = null;
+            if (pen is not null)
+            {
+                if (!IsSimpleSolidPen(pen, out solidStroke))
+                {
+                    _softPathMisses++;
+                    DrawingContextCallStats.OnSoftMiss();
+                    return false;
+                }
+            }
+
+            if (solidFill is null && solidStroke is null)
+                return false;
+
+            float clipOpacity = 1f;
+            RoundedRect clipShape = default;
+            RawRectF contentBounds = default;
+            var paintClipShape = false;
+
+            if (hasSoftClip)
+            {
+                var top = _clipStack.Peek();
+                clipOpacity = top.State == ClipState.SoftMerged ? top.Opacity : 1f;
+                clipShape = top.ClipShape;
+                contentBounds = top.ContentBounds;
+
+                // Stroke expands half thickness outside the fill rect.
+                var halfStroke = pen is null ? 0.0 : pen.Thickness * 0.5;
+                var shape = rrect.Rect;
+                if (shape.X - halfStroke + 0.01 < contentBounds.Left
+                    || shape.Y - halfStroke + 0.01 < contentBounds.Top
+                    || shape.Right + halfStroke - 0.01 > contentBounds.Right
+                    || shape.Bottom + halfStroke - 0.01 > contentBounds.Bottom)
+                {
+                    _softPathMisses++;
+                    DrawingContextCallStats.OnSoftMiss();
+                    return false;
+                }
+
+                // fill == clip → paint clip shape for corner-AA parity with a geometric mask.
+                // fill fully interior to rounded clip → paint fill shape (multi-draw under one clip).
+                // otherwise fall through to real layer (partial intersection not approximated).
+                if (solidFill is not null && pen is null && RectEquals(shape, clipShape.Rect))
+                    paintClipShape = true;
+                else if (!IsFullyInteriorToRoundedClip(shape, halfStroke, clipShape))
+                {
+                    _softPathMisses++;
+                    DrawingContextCallStats.OnSoftMiss();
+                    return false;
+                }
+            }
+
+            var standalone = _standaloneSoftOpacity ?? 1f;
+            var bakedOpacity = clipOpacity * standalone;
+            _softPathHits++;
+            DrawingContextCallStats.OnSoftHit(_diagnosticTargetName);
+
+            if (solidFill is not null)
+            {
+                var effectiveOpacity = solidFill.Opacity * bakedOpacity;
+                if (effectiveOpacity > 0)
+                {
+                    var fillBrush = _deviceResources.GetOrCreateSolidBrush(
+                        _deviceContext,
+                        solidFill.Color,
+                        effectiveOpacity);
+
+                    if (fillBrush.PlatformBrush is not null)
+                    {
+                        // Paint clip shape when fill==clip so corner AA matches a geometric mask.
+                        FillSoftRounded(paintClipShape ? clipShape : rrect, fillBrush.PlatformBrush, stashOnSoftClip: paintClipShape);
+                    }
+                }
+            }
+
+            if (solidStroke is not null && pen is not null)
+            {
+                // IPen has no separate Opacity; stroke alpha lives on the brush.
+                var effectiveOpacity = solidStroke.Opacity * bakedOpacity;
+                if (effectiveOpacity > 0)
+                {
+                    var strokeBrush = _deviceResources.GetOrCreateSolidBrush(
+                        _deviceContext,
+                        solidStroke.Color,
+                        effectiveOpacity);
+                    var strokeStyle = GetOrCreateStrokeStyle(pen);
+                    if (strokeBrush.PlatformBrush is not null)
+                    {
+                        var target = paintClipShape ? clipShape : rrect;
+                        StrokeSoftRounded(target, strokeBrush.PlatformBrush, (float)pen.Thickness, strokeStyle);
+                    }
+                }
+            }
+
+            return true;
         }
 
-        private void ReturnUnusedLayer(ID2D1Layer layer, bool fromPool)
+        private void FillSoftRounded(RoundedRect shape, ID2D1Brush brush, bool stashOnSoftClip)
         {
-            if (fromPool)
-                _layerPool.Push(layer);
-            else
-                layer.Dispose();
+            if (AreRadiiUniform(shape) && IsZeroRadiusOrSafe(shape))
+            {
+                var maxR = Math.Max(shape.RadiiTopLeft.X, shape.RadiiTopLeft.Y);
+                if (maxR <= 0)
+                {
+                    _deviceContext.FillRectangle(shape.Rect.ToDirect2D(), brush);
+                    return;
+                }
+
+                var rounded = new RoundedRectangle
+                {
+                    Rect = shape.Rect.ToDirect2D(),
+                    RadiusX = (float)shape.RadiiTopLeft.X,
+                    RadiusY = (float)shape.RadiiTopLeft.Y
+                };
+                _deviceContext.FillRoundedRectangle(rounded, brush);
+                return;
+            }
+
+            // Non-uniform corners need a path geometry. When painting the soft clip shape itself,
+            // stash geometry on the clip entry so PopClip can release ownership correctly.
+            if (stashOnSoftClip
+                && _clipStack.Count > 0
+                && _clipStack.Peek().State is ClipState.SoftMerged or ClipState.Deferred)
+            {
+                var top = _clipStack.Peek();
+                var geometry = top.Geometry;
+                var owns = top.OwnsGeometry;
+                if (geometry is null)
+                {
+                    geometry = AcquireRoundedClipGeometry(shape, out owns);
+                    _clipStack.Pop();
+                    _clipStack.Push(top.WithGeometry(geometry, owns));
+                }
+                _deviceContext.FillGeometry(geometry, brush);
+                return;
+            }
+
+            using var geometryOwned = CreateRoundedRectGeometry(shape);
+            _deviceContext.FillGeometry(geometryOwned, brush);
         }
+
+        private void StrokeSoftRounded(
+            RoundedRect shape,
+            ID2D1Brush brush,
+            float thickness,
+            ID2D1StrokeStyle? strokeStyle)
+        {
+            if (AreRadiiUniform(shape) && IsZeroRadiusOrSafe(shape))
+            {
+                var maxR = Math.Max(shape.RadiiTopLeft.X, shape.RadiiTopLeft.Y);
+                if (maxR <= 0)
+                {
+                    if (strokeStyle is null)
+                        _deviceContext.DrawRectangle(shape.Rect.ToDirect2D(), brush, thickness);
+                    else
+                        _deviceContext.DrawRectangle(shape.Rect.ToDirect2D(), brush, thickness, strokeStyle);
+                    return;
+                }
+
+                var rounded = new RoundedRectangle
+                {
+                    Rect = shape.Rect.ToDirect2D(),
+                    RadiusX = (float)shape.RadiiTopLeft.X,
+                    RadiusY = (float)shape.RadiiTopLeft.Y
+                };
+                if (strokeStyle is null)
+                    _deviceContext.DrawRoundedRectangle(rounded, brush, thickness);
+                else
+                    _deviceContext.DrawRoundedRectangle(rounded, brush, thickness, strokeStyle);
+                return;
+            }
+
+            using var geometry = CreateRoundedRectGeometry(shape);
+            if (strokeStyle is null)
+                _deviceContext.DrawGeometry(geometry, brush, thickness);
+            else
+                _deviceContext.DrawGeometry(geometry, brush, thickness, strokeStyle);
+        }
+
+        private static bool IsSimpleSolidPen(IPen pen, out ISolidColorBrush solidStroke)
+        {
+            solidStroke = null!;
+            if (pen.Brush is not ISolidColorBrush solid)
+                return false;
+            if (pen.Thickness <= 0)
+                return false;
+            // Dashed pens need a stroke style path; keep soft path solid-only.
+            if (pen.DashStyle is { Dashes.Count: > 0 })
+                return false;
+            solidStroke = solid;
+            return true;
+        }
+
+        private static bool RectEquals(Rect a, Rect b)
+            => Math.Abs(a.X - b.X) < 0.01
+               && Math.Abs(a.Y - b.Y) < 0.01
+               && Math.Abs(a.Width - b.Width) < 0.01
+               && Math.Abs(a.Height - b.Height) < 0.01;
+
+        /// <summary>
+        /// True when <paramref name="shape"/> (optionally expanded by stroke) lies entirely inside
+        /// the axis-aligned inset of the rounded clip, so corner AA of the clip never affects the draw.
+        /// </summary>
+        private static bool IsFullyInteriorToRoundedClip(Rect shape, double halfStroke, RoundedRect clip)
+        {
+            var maxRadius = Math.Max(
+                Math.Max(clip.RadiiTopLeft.X, clip.RadiiTopLeft.Y),
+                Math.Max(
+                    Math.Max(clip.RadiiTopRight.X, clip.RadiiTopRight.Y),
+                    Math.Max(
+                        Math.Max(clip.RadiiBottomRight.X, clip.RadiiBottomRight.Y),
+                        Math.Max(clip.RadiiBottomLeft.X, clip.RadiiBottomLeft.Y))));
+
+            var inset = maxRadius + halfStroke;
+            var cr = clip.Rect;
+            return shape.X - halfStroke + 0.01 >= cr.X + inset
+                   && shape.Y - halfStroke + 0.01 >= cr.Y + inset
+                   && shape.Right + halfStroke - 0.01 <= cr.Right - inset
+                   && shape.Bottom + halfStroke - 0.01 <= cr.Bottom - inset;
+        }
+
+        private static bool IsZeroRadiusOrSafe(RoundedRect rrect)
+        {
+            var radiusX = Math.Max(rrect.RadiiTopLeft.X,
+                Math.Max(rrect.RadiiTopRight.X, Math.Max(rrect.RadiiBottomRight.X, rrect.RadiiBottomLeft.X)));
+            var radiusY = Math.Max(rrect.RadiiTopLeft.Y,
+                Math.Max(rrect.RadiiTopRight.Y, Math.Max(rrect.RadiiBottomRight.Y, rrect.RadiiBottomLeft.Y)));
+            if (radiusX <= 0 && radiusY <= 0)
+                return true;
+            return 2 * radiusX <= rrect.Rect.Width + 0.0001
+                   && 2 * radiusY <= rrect.Rect.Height + 0.0001;
+        }
+
+        private static void ReleaseClipGeometry(in ClipEntry entry)
+        {
+            if (entry.OwnsGeometry)
+                entry.Geometry?.Dispose();
+        }
+
+        /// <summary>
+        /// Returns a rounded-rect geometry suitable as a clip mask. Prefer a process-wide cache so
+        /// repeated clips (and multi-iteration benchmarks / UI frames) reuse the same ID2D1Geometry
+        /// instead of rebuilding path/native rounded geometries every time.
+        /// </summary>
+        private static ID2D1Geometry AcquireRoundedClipGeometry(RoundedRect roundedRect, out bool ownsGeometry)
+        {
+            var key = RoundedRectGeometryKey.From(roundedRect);
+            lock (s_roundedClipGeometryCacheLock)
+            {
+                if (s_roundedClipGeometryCache.TryGetValue(key, out var cached))
+                {
+                    ownsGeometry = false;
+                    return cached;
+                }
+
+                var created = CreateRoundedRectGeometry(roundedRect);
+                if (s_roundedClipGeometryCache.Count < MaxRoundedClipGeometryCacheSize)
+                {
+                    s_roundedClipGeometryCache[key] = created;
+                    ownsGeometry = false;
+                    return created;
+                }
+
+                // Cache full: caller owns and must dispose.
+                ownsGeometry = true;
+                return created;
+            }
+        }
+
+        private enum ClipState : byte
+        {
+            AxisAligned = 0,
+            LayerOwned = 1,
+            Deferred = 2,
+            MergedIntoOpacity = 3,
+            SoftMerged = 4,
+        }
+
+        private readonly struct ClipEntry
+        {
+            public ClipState State { get; }
+            public ID2D1Geometry? Geometry { get; }
+            public RoundedRect ClipShape { get; }
+            public RawRectF ContentBounds { get; }
+            public bool OwnsGeometry { get; }
+            public float Opacity { get; }
+
+            private ClipEntry(
+                ClipState state,
+                ID2D1Geometry? geometry,
+                RoundedRect clipShape,
+                RawRectF contentBounds,
+                bool ownsGeometry,
+                float opacity)
+            {
+                State = state;
+                Geometry = geometry;
+                ClipShape = clipShape;
+                ContentBounds = contentBounds;
+                OwnsGeometry = ownsGeometry;
+                Opacity = opacity;
+            }
+
+            public static ClipEntry AxisAligned()
+                => new(ClipState.AxisAligned, null, default, default, ownsGeometry: false, opacity: 1);
+
+            public static ClipEntry LayerOwned(ID2D1Geometry geometry, bool ownsGeometry)
+                => new(ClipState.LayerOwned, geometry, default, default, ownsGeometry, opacity: 1);
+
+            public static ClipEntry Deferred(RoundedRect clipShape, RawRectF contentBounds)
+                => new(ClipState.Deferred, null, clipShape, contentBounds, ownsGeometry: false, opacity: 1);
+
+            public static ClipEntry MergedIntoOpacity(ID2D1Geometry geometry, bool ownsGeometry)
+                => new(ClipState.MergedIntoOpacity, geometry, default, default, ownsGeometry, opacity: 1);
+
+            public static ClipEntry SoftMerged(RoundedRect clipShape, RawRectF contentBounds, float opacity)
+                => new(ClipState.SoftMerged, null, clipShape, contentBounds, ownsGeometry: false, opacity);
+
+            public ClipEntry WithGeometry(ID2D1Geometry geometry, bool ownsGeometry)
+                => new(State, geometry, ClipShape, ContentBounds, ownsGeometry, Opacity);
+        }
+
+        // Process-wide cache of rounded clip geometries. Keys are quantized to avoid float drift.
+        // Entries are never disposed while the process lives (bounded by MaxRoundedClipGeometryCacheSize).
+        private static readonly object s_roundedClipGeometryCacheLock = new();
+        private static readonly Dictionary<RoundedRectGeometryKey, ID2D1Geometry> s_roundedClipGeometryCache = new();
+        private const int MaxRoundedClipGeometryCacheSize = 512;
 
         /// <summary>
         /// Creates a Direct2D brush wrapper for a Avalonia brush.
@@ -1450,49 +2162,31 @@ namespace MIR.Direct2D1ForAvalonia.Media
         }
 
         /// <summary>
-        /// Returns a cached <see cref="SolidColorBrushImpl"/> for the given color+opacity,
-        /// creating one on first use. Cached brushes are disposed when the drawing context
-        /// itself is disposed, not by individual draw calls.
+        /// Returns a device-cached <see cref="SolidColorBrushImpl"/> for the given color+opacity.
+        /// Owned by <see cref="D2DDeviceResourceCache"/> for the render target's lifetime.
         /// </summary>
         private SolidColorBrushImpl GetOrCreateSolidBrush(ISolidColorBrush? brush)
         {
             var color = brush?.Color ?? default;
             var opacity = brush?.Opacity ?? 1.0;
-            var key = new SolidBrushKey(color, opacity);
-
-            if (_solidBrushCache.TryGetValue(key, out var cached))
-                return cached;
-
-            var impl = new SolidColorBrushImpl(brush, _deviceContext)
-            {
-                IsCached = true
-            };
-            _solidBrushCache[key] = impl;
-            return impl;
+            return _deviceResources.GetOrCreateSolidBrush(_deviceContext, color, opacity);
         }
 
         /// <summary>
-        /// Returns a cached <see cref="ID2D1StrokeStyle"/> for the given pen, creating one
-        /// on first use. D2D stroke styles are immutable device resources — the same pen
-        /// properties always produce an identical stroke style, so caching avoids a COM
-        /// allocation per stroked draw call.
+        /// Returns a device-cached <see cref="ID2D1StrokeStyle"/> for the given pen.
+        /// Stroke styles are immutable factory resources shared across frames.
         /// </summary>
         private ID2D1StrokeStyle? GetOrCreateStrokeStyle(IPen? pen)
         {
             if (pen is null)
                 return null;
 
-            var key = new StrokeStyleKey(pen);
-            if (_strokeStyleCache.TryGetValue(key, out var cached))
-                return cached;
-
-            var style = pen.ToDirect2DStrokeStyle(_deviceContext);
-            _strokeStyleCache[key] = style;
-            return style;
+            return _deviceResources.GetOrCreateStrokeStyle(pen, _deviceContext);
         }
 
         public void PushGeometryClip(IGeometryImpl clip)
         {
+            FlushDeferredClip();
             var parameters = new LayerParameters
             {
                 ContentBounds = PrimitiveExtensions.RectangleInfinite,
@@ -1532,6 +2226,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void PushOpacityMask(IBrush mask, Rect bounds)
         {
+            FlushDeferredClip();
             var opacityBrush = CreateBrush(mask, bounds);
             var parameters = new LayerParameters
             {
@@ -1616,6 +2311,70 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 TextRenderingMode.SubpixelAntialias => TextAntialiasMode.Cleartype,
                 _ => TextAntialiasMode.Default
             };
+        }
+    }
+
+    /// <summary>
+    /// Quantized key for caching rounded-rectangle clip geometries across frames.
+    /// </summary>
+    internal readonly struct RoundedRectGeometryKey : IEquatable<RoundedRectGeometryKey>
+    {
+        // 1/64 px quantization — stable for layout pixel values while collapsing float noise.
+        private const double Scale = 64.0;
+
+        private readonly long _x;
+        private readonly long _y;
+        private readonly long _w;
+        private readonly long _h;
+        private readonly int _tlX;
+        private readonly int _tlY;
+        private readonly int _trX;
+        private readonly int _trY;
+        private readonly int _brX;
+        private readonly int _brY;
+        private readonly int _blX;
+        private readonly int _blY;
+
+        private RoundedRectGeometryKey(
+            long x, long y, long w, long h,
+            int tlX, int tlY, int trX, int trY,
+            int brX, int brY, int blX, int blY)
+        {
+            _x = x; _y = y; _w = w; _h = h;
+            _tlX = tlX; _tlY = tlY; _trX = trX; _trY = trY;
+            _brX = brX; _brY = brY; _blX = blX; _blY = blY;
+        }
+
+        public static RoundedRectGeometryKey From(RoundedRect roundedRect)
+        {
+            static long Q(double v) => (long)Math.Round(v * Scale);
+            static int Qi(double v) => (int)Math.Round(v * Scale);
+
+            var r = roundedRect.Rect;
+            return new RoundedRectGeometryKey(
+                Q(r.X), Q(r.Y), Q(r.Width), Q(r.Height),
+                Qi(roundedRect.RadiiTopLeft.X), Qi(roundedRect.RadiiTopLeft.Y),
+                Qi(roundedRect.RadiiTopRight.X), Qi(roundedRect.RadiiTopRight.Y),
+                Qi(roundedRect.RadiiBottomRight.X), Qi(roundedRect.RadiiBottomRight.Y),
+                Qi(roundedRect.RadiiBottomLeft.X), Qi(roundedRect.RadiiBottomLeft.Y));
+        }
+
+        public bool Equals(RoundedRectGeometryKey other) =>
+            _x == other._x && _y == other._y && _w == other._w && _h == other._h
+            && _tlX == other._tlX && _tlY == other._tlY
+            && _trX == other._trX && _trY == other._trY
+            && _brX == other._brX && _brY == other._brY
+            && _blX == other._blX && _blY == other._blY;
+
+        public override bool Equals(object? obj) => obj is RoundedRectGeometryKey other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            var hash = new HashCode();
+            hash.Add(_x); hash.Add(_y); hash.Add(_w); hash.Add(_h);
+            hash.Add(_tlX); hash.Add(_tlY); hash.Add(_trX); hash.Add(_trY);
+            hash.Add(_brX); hash.Add(_brY); hash.Add(_blX); hash.Add(_blY);
+            return hash.ToHashCode();
         }
     }
 

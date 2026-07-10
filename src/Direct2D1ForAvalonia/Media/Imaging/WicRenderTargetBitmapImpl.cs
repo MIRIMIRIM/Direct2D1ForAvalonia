@@ -8,6 +8,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
     internal class WicRenderTargetBitmapImpl : WicBitmapImpl, IDrawingContextLayerImpl, IRenderTargetBitmapImpl
     {
         private readonly ID2D1RenderTarget _renderTarget;
+        private DrawingContextImpl? _reusableDrawingContext;
+        private bool? _reusableUseScaledDrawing;
 
         public WicRenderTargetBitmapImpl(
             PixelSize size,
@@ -29,6 +31,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public override void Dispose()
         {
+            _reusableDrawingContext = null;
             _renderTarget.Dispose();
 
             base.Dispose();
@@ -43,11 +46,36 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing, Action? finishedCallback)
         {
-            return new DrawingContextImpl(null, _renderTarget, useScaledDrawing, finishedCallback: () =>
+            Action combined = () =>
+            {
+                Version++;
+                finishedCallback?.Invoke();
+            };
+
+            // Only reuse when no outer finishedCallback is required (common bitmap path).
+            // Callers that pass a custom callback get a one-shot session to preserve semantics.
+            if (finishedCallback is null)
+            {
+                if (_reusableDrawingContext is null || _reusableUseScaledDrawing != useScaledDrawing)
                 {
-                    Version++;
-                    finishedCallback?.Invoke();
-                });
+                    _reusableUseScaledDrawing = useScaledDrawing;
+                    _reusableDrawingContext = new DrawingContextImpl(
+                        null,
+                        _renderTarget,
+                        useScaledDrawing,
+                        finishedCallback: combined);
+                    // WIC RTs QI to a device context we own — keep it across sessions.
+                    _reusableDrawingContext.EnableSessionReuse();
+                }
+                else
+                {
+                    _reusableDrawingContext.ReopenSession(finishedCallback: combined);
+                }
+
+                return _reusableDrawingContext;
+            }
+
+            return new DrawingContextImpl(null, _renderTarget, useScaledDrawing, finishedCallback: combined);
         }
 
         public void Blit(IDrawingContextImpl context)

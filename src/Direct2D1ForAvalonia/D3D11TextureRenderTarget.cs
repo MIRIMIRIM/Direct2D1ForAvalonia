@@ -21,6 +21,7 @@ namespace MIR.Direct2D1ForAvalonia
         private readonly IDirect3D11TextureRenderTarget? _target;
         private readonly IDirect3D11TextureRenderTarget2? _target2;
         private readonly ID2D1DeviceContext _deviceContext;
+        private DrawingContextImpl? _reusableDrawingContext;
         private readonly TextureTargetCacheEntry?[] _textureTargetCache = new TextureTargetCacheEntry?[MaxCachedTextureTargets];
         private Vector _lastDpi = new Vector(96, 96);
         private bool _disposed;
@@ -72,7 +73,9 @@ namespace MIR.Direct2D1ForAvalonia
             properties = default;
 
             var frameId = ++_frameId;
+            Direct2D1FrameProfiler.MarkSurfaceBegin();
             var session = _target2?.BeginDraw(sceneInfo) ?? _target!.BeginDraw();
+            Direct2D1FrameProfiler.MarkSurfaceReady();
             TextureTargetCacheEntry? targetEntry = null;
 
             try
@@ -123,34 +126,70 @@ namespace MIR.Direct2D1ForAvalonia
                         $"contextPixel={FormatSize(_deviceContext.PixelSize)} contextDpi={FormatSize(_deviceContext.Dpi)}");
                 }
 
+                // Capture soft-path / layer counters from the previous session when diagnostics are on.
+                if (Direct2D1Diagnostics.IsEnabled
+                    && _reusableDrawingContext is not null
+                    && Direct2D1Diagnostics.ShouldLogFrame(frameId, important: frameId == 1))
+                {
+                    var c = _reusableDrawingContext.SessionCounters;
+                    Direct2D1Diagnostics.Write(
+                        $"d3d11-texture-frame prev-session id={frameId - 1} " +
+                        $"softHits={c.SoftHits} softMisses={c.SoftMisses} " +
+                        $"layers={c.LayerPushes} deferredFlushes={c.DeferredFlushes}");
+                }
+
                 var targetTransform = session.Offset == default
                     ? (Matrix?)null
                     : Matrix.CreateTranslation(
                         session.Offset.X / session.Scaling,
                         session.Offset.Y / session.Scaling);
 
-                return new DrawingContextImpl(
-                    this,
-                    _deviceContext,
-                    useScaledDrawing: false,
-                    finishedCallback: () => FlushDirect3DDevice(frameId),
-                    targetTransform: targetTransform,
-                    cleanupCallback: () =>
+                Action finishedCallback = () =>
+                {
+                    FlushDirect3DDevice(frameId);
+                    Direct2D1FrameProfiler.MarkFlushDone();
+                };
+                Action cleanupCallback = () =>
+                {
+                    if (Direct2D1Diagnostics.ShouldLogFrame(frameId, important: frameId == 1))
                     {
-                        if (Direct2D1Diagnostics.ShouldLogFrame(frameId, important: frameId == 1))
-                        {
-                            Direct2D1Diagnostics.Write($"d3d11-texture-frame cleanup id={frameId}");
-                        }
+                        Direct2D1Diagnostics.Write($"d3d11-texture-frame cleanup id={frameId}");
+                    }
 
-                        try
-                        {
-                            _deviceContext.Target = null;
-                        }
-                        finally
-                        {
-                            session.Dispose();
-                        }
-                    });
+                    try
+                    {
+                        _deviceContext.Target = null;
+                    }
+                    finally
+                    {
+                        // session.Dispose returns the D3D11 texture to Avalonia composition —
+                        // this is the Present hand-off path (not a DXGI SwapChain.Present call).
+                        session.Dispose();
+                        Direct2D1FrameProfiler.MarkCleanupDone();
+                    }
+                };
+
+                if (_reusableDrawingContext is null)
+                {
+                    _reusableDrawingContext = new DrawingContextImpl(
+                        this,
+                        _deviceContext,
+                        useScaledDrawing: false,
+                        finishedCallback: finishedCallback,
+                        targetTransform: targetTransform,
+                        cleanupCallback: cleanupCallback);
+                    _reusableDrawingContext.EnableSessionReuse();
+                }
+                else
+                {
+                    _reusableDrawingContext.ReopenSession(
+                        finishedCallback: finishedCallback,
+                        cleanupCallback: cleanupCallback,
+                        targetTransform: targetTransform);
+                }
+
+                Direct2D1FrameProfiler.MarkSetupDone();
+                return _reusableDrawingContext;
             }
             catch
             {
@@ -163,18 +202,22 @@ namespace MIR.Direct2D1ForAvalonia
         public IDrawingContextLayerImpl CreateLayer(Size size)
         {
             var dpi = _lastDpi;
-            var pixelSize = PixelSize.FromSizeWithDpi(size, dpi);
             if (Direct2D1Diagnostics.IsEnabled)
             {
+                var pixelSize = PixelSize.FromSizeWithDpi(size, dpi);
                 Direct2D1Diagnostics.Write(
                     $"d3d11-texture-create-layer requestedDip={FormatSize(size)} pixel={FormatSize(pixelSize)} dpi={FormatSize(dpi)}");
             }
 
-            return new WicRenderTargetBitmapImpl(pixelSize, dpi);
+            // GPU-compatible intermediate (same device as the window surface). Prefer this over
+            // WIC/CPU layers so flushed soft clips and opacity layers stay on the GPU.
+            // Avalonia passes size in DIPs; CreateCompatible matches D2D device-independent units.
+            return Media.Imaging.D2DRenderTargetBitmapImpl.CreateCompatible(_deviceContext, size);
         }
 
         public void Dispose()
         {
+            _reusableDrawingContext = null;
             if (_disposed)
             {
                 return;

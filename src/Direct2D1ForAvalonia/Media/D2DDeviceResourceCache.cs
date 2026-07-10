@@ -9,27 +9,47 @@ namespace MIR.Direct2D1ForAvalonia.Media;
 /// <summary>
 /// A cache of device-dependent D2D resources that outlives a single frame.
 /// <para>
-/// A <see cref="DrawingContextImpl"/> is created and disposed once per frame, so any cache
-/// stored on it is a frame-local cache — useless for scenes that draw the same brush at
-/// different positions across frames. Gradient stop collections, however, depend only on the
-/// stops and spread method (not the destination geometry), so the same collection is reusable
-/// across frames. This cache is keyed on the owning render target's identity, so it lives as
-/// long as the render target does and is dropped (and its COM resources released) when the
-/// render target is collected — including on device loss, when a fresh render target is created.
+/// Prefer keying on <see cref="ID2D1Device"/> when the render target is a device context:
+/// composition replay opens short-lived intermediate targets every frame, so a per-render-target
+/// cache would go cold every frame. Device-level solid brushes / stroke styles / gradient stops
+/// are valid across all device contexts created from the same D2D device.
+/// </para>
+/// <para>
+/// Classic WIC / factory render targets (no device) keep a per-render-target cache.
 /// </para>
 /// </summary>
 internal sealed class D2DDeviceResourceCache
 {
-    // Keyed on the render-target RCW identity. The render target wrapper instance is stable for
-    // the lifetime of the target, so the same cache is returned every frame. Weak keys mean the
-    // cache (and its cached COM resources) become eligible for collection once the render target
-    // is gone; no explicit disposal hook is required.
-    private static readonly ConditionalWeakTable<ID2D1RenderTarget, D2DDeviceResourceCache> s_caches = new();
+    // Shared by all ID2D1DeviceContext instances from the same ID2D1Device (window surface +
+    // composition intermediates + GPU-compatible layers).
+    private static readonly ConditionalWeakTable<ID2D1Device, D2DDeviceResourceCache> s_deviceCaches = new();
+
+    // Fallback for non-device-context targets (e.g. pure WIC RT without a device association).
+    private static readonly ConditionalWeakTable<ID2D1RenderTarget, D2DDeviceResourceCache> s_renderTargetCaches = new();
 
     private readonly Dictionary<GradientStopKey, ID2D1GradientStopCollection> _gradientStops = new();
+    private readonly Dictionary<SolidBrushKey, SolidColorBrushImpl> _solidBrushes = new();
+    private readonly Dictionary<StrokeStyleKey, ID2D1StrokeStyle> _strokeStyles = new();
 
     public static D2DDeviceResourceCache For(ID2D1RenderTarget renderTarget)
-        => s_caches.GetValue(renderTarget, static _ => new D2DDeviceResourceCache());
+    {
+        // Device-context path: share one cache for the whole D2D device.
+        if (renderTarget is ID2D1DeviceContext deviceContext)
+        {
+            try
+            {
+                var device = deviceContext.Device;
+                if (device is not null)
+                    return s_deviceCaches.GetValue(device, static _ => new D2DDeviceResourceCache());
+            }
+            catch
+            {
+                // Fall through to per-RT cache if Device is unavailable.
+            }
+        }
+
+        return s_renderTargetCaches.GetValue(renderTarget, static _ => new D2DDeviceResourceCache());
+    }
 
     /// <summary>
     /// Returns a cached <see cref="ID2D1GradientStopCollection"/> for the given stops and spread
@@ -59,6 +79,61 @@ internal sealed class D2DDeviceResourceCache
         var collection = target.CreateGradientStopCollection(d2dStops, spreadMethod.ToDirect2D());
         _gradientStops[key] = collection;
         return collection;
+    }
+
+    /// <summary>
+    /// Returns a cached solid-color brush for the given color+opacity. Owned by the cache —
+    /// callers must not dispose it (SolidColorBrushImpl.IsCached is set).
+    /// Solid brushes ignore pattern transforms, so they are safe to reuse under any world transform.
+    /// Device-context brushes may be used with any device context from the same D2D device.
+    /// </summary>
+    public SolidColorBrushImpl GetOrCreateSolidBrush(ID2D1RenderTarget target, Color color, double opacity)
+    {
+        var key = new SolidBrushKey(color, opacity);
+        if (_solidBrushes.TryGetValue(key, out var cached))
+            return cached;
+
+        var impl = new SolidColorBrushImpl(color, opacity, target)
+        {
+            IsCached = true
+        };
+        _solidBrushes[key] = impl;
+        return impl;
+    }
+
+    /// <summary>
+    /// Returns a cached stroke style for the given pen properties, or <c>null</c> when the pen
+    /// matches D2D's default stroke (solid, flat caps, miter join, miter limit 10) so callers can
+    /// omit the stroke-style argument entirely — cheaper for the common solid-outline case.
+    /// Non-null styles are immutable factory resources owned by the cache — do not dispose.
+    /// </summary>
+    public ID2D1StrokeStyle? GetOrCreateStrokeStyle(IPen pen, ID2D1RenderTarget target)
+    {
+        if (IsDefaultSolidStroke(pen))
+            return null;
+
+        var key = new StrokeStyleKey(pen);
+        if (_strokeStyles.TryGetValue(key, out var cached))
+            return cached;
+
+        var style = pen.ToDirect2DStrokeStyle(target);
+        _strokeStyles[key] = style;
+        return style;
+    }
+
+    /// <summary>
+    /// True when D2D's implicit default stroke style matches the pen (no COM object needed).
+    /// </summary>
+    public static bool IsDefaultSolidStroke(IPen pen)
+    {
+        if (pen.DashStyle is { Dashes.Count: > 0 })
+            return false;
+        if (pen.LineCap != PenLineCap.Flat)
+            return false;
+        if (pen.LineJoin != PenLineJoin.Miter)
+            return false;
+        // Avalonia default miter limit is 10 — same as D2D's default when style is null.
+        return Math.Abs(pen.MiterLimit - 10.0) < 0.001;
     }
 }
 

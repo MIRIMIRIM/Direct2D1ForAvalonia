@@ -20,6 +20,16 @@ if (!OperatingSystem.IsWindows())
     throw new PlatformNotSupportedException("Benchmarks target Windows only.");
 
 // Route to D2D-vs-Skia rendering benchmark if requested.
+if (args.Length > 0 && args[0] == "--bench-render-verify")
+{
+    return RenderBenchmarkCommand.VerifyGpuMatchesWic();
+}
+
+if (args.Length > 0 && args[0] == "--bench-windowed")
+{
+    return WindowedRenderBenchmarkCommand.Run(args);
+}
+
 if (args.Length > 0 && (args[0] == "--bench-render" || args[0] == "--bench-render-worker"))
 {
     var renderOptions = RenderBenchmarkOptions.Parse(args);

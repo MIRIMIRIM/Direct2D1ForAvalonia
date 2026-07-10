@@ -15,6 +15,8 @@ namespace MIR.Direct2D1ForAvalonia
         /// The render target.
         /// </summary>
         private readonly ID2D1RenderTarget _renderTarget = renderTarget;
+        private DrawingContextImpl? _reusableDrawingContext;
+        private bool? _reusableUseScaledDrawing;
 
         /// <summary>
         /// Creates a drawing context for a rendering session.
@@ -22,7 +24,18 @@ namespace MIR.Direct2D1ForAvalonia
         /// <returns>An <see cref="Avalonia.Platform.IDrawingContextImpl"/>.</returns>
         internal IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing)
         {
-            return new DrawingContextImpl(this, _renderTarget, useScaledDrawing);
+            if (_reusableDrawingContext is null || _reusableUseScaledDrawing != useScaledDrawing)
+            {
+                _reusableUseScaledDrawing = useScaledDrawing;
+                _reusableDrawingContext = new DrawingContextImpl(this, _renderTarget, useScaledDrawing);
+                _reusableDrawingContext.EnableSessionReuse();
+            }
+            else
+            {
+                _reusableDrawingContext.ReopenSession();
+            }
+
+            return _reusableDrawingContext;
         }
 
         public Avalonia.Platform.RenderTargetProperties Properties => new()
@@ -43,6 +56,7 @@ namespace MIR.Direct2D1ForAvalonia
 
         public void Dispose()
         {
+            _reusableDrawingContext = null;
             _renderTarget.Dispose();
         }
     }

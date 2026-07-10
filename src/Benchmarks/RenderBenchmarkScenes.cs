@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using Avalonia.Media.Immutable;
 using Avalonia.Platform;
 
 namespace Benchmarks;
@@ -9,9 +10,51 @@ namespace Benchmarks;
 /// High-load rendering scenes designed to stress brush allocation, geometry
 /// rasterisation, and the clip/layer pipeline — the areas where D2D and Skia
 /// diverge most in per-frame allocation behaviour.
+/// <para>
+/// Mutable Avalonia brushes are pre-created where a real UI would also reuse them
+/// (or use immutable brushes). Scenes still create enough distinct resources to
+/// exercise backend caches without drowning measurements in per-cell managed noise.
+/// </para>
 /// </summary>
 internal static class RenderBenchmarkScenes
 {
+    // Shared palette — mirrors real apps holding brush resources rather than allocating per cell.
+    private static readonly IImmutableSolidColorBrush[] s_palette =
+    [
+        new ImmutableSolidColorBrush(Colors.Red),
+        new ImmutableSolidColorBrush(Colors.Lime),
+        new ImmutableSolidColorBrush(Colors.Blue),
+        new ImmutableSolidColorBrush(Colors.Yellow),
+        new ImmutableSolidColorBrush(Colors.Cyan),
+        new ImmutableSolidColorBrush(Colors.Magenta),
+        new ImmutableSolidColorBrush(Colors.Orange),
+        new ImmutableSolidColorBrush(Colors.Purple),
+        new ImmutableSolidColorBrush(Colors.Pink),
+        new ImmutableSolidColorBrush(Colors.Teal),
+        new ImmutableSolidColorBrush(Colors.Indigo),
+        new ImmutableSolidColorBrush(Colors.Gold),
+        new ImmutableSolidColorBrush(Colors.Coral),
+        new ImmutableSolidColorBrush(Colors.Navy),
+        new ImmutableSolidColorBrush(Colors.Olive),
+        new ImmutableSolidColorBrush(Colors.Maroon),
+    ];
+
+    private static readonly IImmutableSolidColorBrush s_darkSlateGray = new ImmutableSolidColorBrush(Colors.DarkSlateGray);
+    private static readonly IPen s_darkSlateGrayPen = new ImmutablePen(s_darkSlateGray, 1.5);
+    private static readonly IPen s_blackPen = new ImmutablePen(Brushes.Black, 1);
+    private static readonly IPen s_darkRedPen = new ImmutablePen(Brushes.DarkRed, 1);
+    private static readonly IPen s_lightGrayPen = new ImmutablePen(Brushes.LightGray, 1);
+    private static readonly IImmutableSolidColorBrush s_gold = new ImmutableSolidColorBrush(Colors.Gold);
+
+    private static readonly IBrush[] s_linearBands = CreateLinearBands();
+    private static readonly IBrush[] s_horizontalBands = CreateHorizontalBands();
+    private static readonly IBrush[] s_radialCells = CreateRadialCells();
+    private static readonly IBrush[] s_panelBrushes = CreatePanelBrushes();
+    private static readonly IBrush[] s_clipLayerBrushes = CreateClipLayerBrushes();
+    private static readonly IBrush[] s_roundedGridBrushes = CreateRoundedGridBrushes();
+    private static readonly IBrush[] s_mixedBottomBrushes = CreateMixedBottomBrushes();
+    private static readonly IBrush[] s_ellipseBrushes = CreateEllipseBrushes();
+
     public static readonly RenderBenchScene[] All =
     [
         new("SolidBrushGrid", new PixelSize(512, 512), new Vector(96, 96), 200, DrawSolidBrushGrid),
@@ -35,34 +78,26 @@ internal static class RenderBenchmarkScenes
 
     /// <summary>
     /// Draws a grid of solid-filled rectangles with 16 distinct colors repeated.
-    /// Stress-tests solid-color brush allocation (the primary cache benefit).
+    /// Stress-tests solid-color brush resolution / device caching under high draw count.
     /// </summary>
     private static void DrawSolidBrushGrid(DrawingContext context)
     {
         context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 512, 512));
-
-        var colors = new[]
-        {
-            Colors.Red, Colors.Lime, Colors.Blue, Colors.Yellow,
-            Colors.Cyan, Colors.Magenta, Colors.Orange, Colors.Purple,
-            Colors.Pink, Colors.Teal, Colors.Indigo, Colors.Gold,
-            Colors.Coral, Colors.Navy, Colors.Olive, Colors.Maroon
-        };
 
         var cellSize = 32;
         for (var y = 0; y < 512; y += cellSize)
         {
             for (var x = 0; x < 512; x += cellSize)
             {
-                var color = colors[((x / cellSize) + (y / cellSize)) % colors.Length];
-                context.DrawRectangle(new SolidColorBrush(color), null, new Rect(x, y, cellSize, cellSize));
+                var brush = s_palette[((x / cellSize) + (y / cellSize)) % s_palette.Length];
+                context.DrawRectangle(brush, null, new Rect(x, y, cellSize, cellSize));
             }
         }
     }
 
     /// <summary>
     /// Draws overlapping linear and radial gradient rectangles.
-    /// Stress-tests gradient brush + gradient-stop-collection allocation.
+    /// Stress-tests gradient brush + gradient-stop-collection caching.
     /// </summary>
     private static void DrawGradientFill(DrawingContext context)
     {
@@ -71,60 +106,33 @@ internal static class RenderBenchmarkScenes
         for (var i = 0; i < 8; i++)
         {
             var offset = i * 60;
-            context.DrawRectangle(
-                new LinearGradientBrush
-                {
-                    StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
-                    EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
-                    GradientStops =
-                    {
-                        new GradientStop(Color.FromRgb((byte)(offset), 100, 200), 0),
-                        new GradientStop(Color.FromRgb(200, (byte)(offset), 100), 1)
-                    }
-                },
-                null,
-                new Rect(offset, offset, 120, 120));
+            context.DrawRectangle(s_linearBands[i], null, new Rect(offset, offset, 120, 120));
         }
 
         for (var i = 0; i < 6; i++)
         {
             var cx = 60 + i * 70;
-            context.DrawRectangle(
-                new RadialGradientBrush
-                {
-                    Center = RelativePoint.Center,
-                    GradientOrigin = new RelativePoint(0.3, 0.3, RelativeUnit.Relative),
-                    RadiusX = new RelativeScalar(0.6, RelativeUnit.Relative),
-                    RadiusY = new RelativeScalar(0.6, RelativeUnit.Relative),
-                    GradientStops =
-                    {
-                        new GradientStop(Color.FromRgb(255, 240, 100), 0),
-                        new GradientStop(Color.FromRgb(20, 80, 180), 1)
-                    }
-                },
-                null,
-                new Rect(cx, 300, 60, 60));
+            context.DrawRectangle(s_radialCells[i], null, new Rect(cx, 300, 60, 60));
         }
     }
 
     /// <summary>
     /// Draws a grid of rounded rectangles with stroke pens.
-    /// Stress-tests rounded-rect geometry creation and pen/brush allocation.
+    /// Stress-tests rounded-rect primitives and pen/brush caching.
     /// </summary>
     private static void DrawRoundedRectGrid(DrawingContext context)
     {
         context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 512, 512));
 
         var cellSize = 64;
+        var index = 0;
         for (var y = 0; y < 512; y += cellSize)
         {
             for (var x = 0; x < 512; x += cellSize)
             {
-                var hue = ((x / cellSize) * 16 + (y / cellSize) * 4) % 360;
-                var color = HsvToColor(hue, 0.7, 0.9);
                 context.DrawRectangle(
-                    new SolidColorBrush(color),
-                    new Pen(new SolidColorBrush(Colors.DarkSlateGray), 1.5),
+                    s_roundedGridBrushes[index++],
+                    s_darkSlateGrayPen,
                     new RoundedRect(new Rect(x + 4, y + 4, cellSize - 8, cellSize - 8), 8));
             }
         }
@@ -132,7 +140,7 @@ internal static class RenderBenchmarkScenes
 
     /// <summary>
     /// Draws many nested clip+opacity layers.
-    /// Stress-tests the D2D layer pool and Skia stencil/clip path.
+    /// Stress-tests D2D rounded-clip/opacity layering and Skia stencil/clip path.
     /// </summary>
     private static void DrawClipLayerHeavy(DrawingContext context)
     {
@@ -145,8 +153,7 @@ internal static class RenderBenchmarkScenes
             {
                 using (context.PushOpacity(0.85))
                 {
-                    var color = HsvToColor(i * 30, 0.6, 0.9);
-                    context.DrawRectangle(new SolidColorBrush(color), null, rect);
+                    context.DrawRectangle(s_clipLayerBrushes[i], null, rect);
                 }
             }
         }
@@ -160,74 +167,161 @@ internal static class RenderBenchmarkScenes
     {
         context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 512, 512));
 
-        // Solid-filled panels with borders
         for (var i = 0; i < 4; i++)
         {
             var rect = new Rect(16 + i * 124, 16, 112, 80);
-            context.DrawRectangle(
-                new SolidColorBrush(Color.FromArgb(220, (byte)(40 + i * 30), 100, 180)),
-                new Pen(Brushes.Black, 1),
-                new RoundedRect(rect, 6));
+            context.DrawRectangle(s_panelBrushes[i], s_blackPen, new RoundedRect(rect, 6));
         }
 
-        // Gradient bands
         for (var i = 0; i < 3; i++)
         {
-            context.DrawRectangle(
-                new LinearGradientBrush
-                {
-                    StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
-                    EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
-                    GradientStops =
-                    {
-                        new GradientStop(Colors.CornflowerBlue, 0),
-                        new GradientStop(Colors.White, 0.5),
-                        new GradientStop(Colors.CornflowerBlue, 1)
-                    }
-                },
-                null,
-                new Rect(16 + i * 170, 112, 160, 24));
+            context.DrawRectangle(s_horizontalBands[i], null, new Rect(16 + i * 170, 112, 160, 24));
         }
 
-        // Clipped ellipse stack
         using (context.PushClip(new Rect(16, 152, 240, 120)))
         {
             for (var i = 0; i < 5; i++)
             {
                 context.DrawEllipse(
-                    new SolidColorBrush(Color.FromArgb(180, (byte)(200 - i * 20), 100, 50)),
-                    new Pen(Brushes.DarkRed, 1),
+                    s_ellipseBrushes[i],
+                    s_darkRedPen,
                     new Rect(16 + i * 20, 152 + i * 10, 80, 80));
             }
         }
 
-        // Opacity-layered shapes
         using (context.PushOpacity(0.5))
         {
             for (var i = 0; i < 4; i++)
             {
                 context.DrawRectangle(
-                    new SolidColorBrush(Colors.Gold),
+                    s_gold,
                     null,
                     new RoundedRect(new Rect(280 + i * 50, 152, 40, 40), 6));
             }
         }
 
-        // Line grid
         for (var y = 300; y < 500; y += 16)
         {
-            context.DrawLine(new Pen(Brushes.LightGray, 1), new Point(16, y), new Point(496, y));
+            context.DrawLine(s_lightGrayPen, new Point(16, y), new Point(496, y));
         }
 
-        // Filled rounded rects
         for (var i = 0; i < 8; i++)
         {
-            var color = HsvToColor(i * 45, 0.5, 0.85);
             context.DrawRectangle(
-                new SolidColorBrush(color),
+                s_mixedBottomBrushes[i],
                 null,
                 new RoundedRect(new Rect(16 + i * 62, 430, 56, 56), 10));
         }
+    }
+
+    private static IBrush[] CreateLinearBands()
+    {
+        var brushes = new IBrush[8];
+        for (var i = 0; i < brushes.Length; i++)
+        {
+            var offset = i * 60;
+            brushes[i] = new ImmutableLinearGradientBrush(
+                [
+                    new ImmutableGradientStop(0, Color.FromRgb((byte)offset, 100, 200)),
+                    new ImmutableGradientStop(1, Color.FromRgb(200, (byte)offset, 100)),
+                ],
+                opacity: 1,
+                transform: null,
+                transformOrigin: default,
+                spreadMethod: GradientSpreadMethod.Pad,
+                startPoint: new RelativePoint(0, 0, RelativeUnit.Relative),
+                endPoint: new RelativePoint(1, 1, RelativeUnit.Relative));
+        }
+        return brushes;
+    }
+
+    private static IBrush[] CreateHorizontalBands()
+    {
+        var brushes = new IBrush[3];
+        for (var i = 0; i < brushes.Length; i++)
+        {
+            brushes[i] = new ImmutableLinearGradientBrush(
+                [
+                    new ImmutableGradientStop(0, Colors.CornflowerBlue),
+                    new ImmutableGradientStop(0.5, Colors.White),
+                    new ImmutableGradientStop(1, Colors.CornflowerBlue),
+                ],
+                opacity: 1,
+                transform: null,
+                transformOrigin: default,
+                spreadMethod: GradientSpreadMethod.Pad,
+                startPoint: new RelativePoint(0, 0, RelativeUnit.Relative),
+                endPoint: new RelativePoint(1, 0, RelativeUnit.Relative));
+        }
+        return brushes;
+    }
+
+    private static IBrush[] CreateRadialCells()
+    {
+        var brushes = new IBrush[6];
+        for (var i = 0; i < brushes.Length; i++)
+        {
+            brushes[i] = new ImmutableRadialGradientBrush(
+                [
+                    new ImmutableGradientStop(0, Color.FromRgb(255, 240, 100)),
+                    new ImmutableGradientStop(1, Color.FromRgb(20, 80, 180)),
+                ],
+                opacity: 1,
+                transform: null,
+                transformOrigin: default,
+                spreadMethod: GradientSpreadMethod.Pad,
+                center: RelativePoint.Center,
+                gradientOrigin: new RelativePoint(0.3, 0.3, RelativeUnit.Relative),
+                radius: 0.6);
+        }
+        return brushes;
+    }
+
+    private static IBrush[] CreatePanelBrushes()
+    {
+        var brushes = new IBrush[4];
+        for (var i = 0; i < brushes.Length; i++)
+            brushes[i] = new ImmutableSolidColorBrush(Color.FromArgb(220, (byte)(40 + i * 30), 100, 180));
+        return brushes;
+    }
+
+    private static IBrush[] CreateClipLayerBrushes()
+    {
+        var brushes = new IBrush[12];
+        for (var i = 0; i < brushes.Length; i++)
+            brushes[i] = new ImmutableSolidColorBrush(HsvToColor(i * 30, 0.6, 0.9));
+        return brushes;
+    }
+
+    private static IBrush[] CreateRoundedGridBrushes()
+    {
+        var brushes = new List<IBrush>(64);
+        var cellSize = 64;
+        for (var y = 0; y < 512; y += cellSize)
+        {
+            for (var x = 0; x < 512; x += cellSize)
+            {
+                var hue = ((x / cellSize) * 16 + (y / cellSize) * 4) % 360;
+                brushes.Add(new ImmutableSolidColorBrush(HsvToColor(hue, 0.7, 0.9)));
+            }
+        }
+        return brushes.ToArray();
+    }
+
+    private static IBrush[] CreateMixedBottomBrushes()
+    {
+        var brushes = new IBrush[8];
+        for (var i = 0; i < brushes.Length; i++)
+            brushes[i] = new ImmutableSolidColorBrush(HsvToColor(i * 45, 0.5, 0.85));
+        return brushes;
+    }
+
+    private static IBrush[] CreateEllipseBrushes()
+    {
+        var brushes = new IBrush[5];
+        for (var i = 0; i < brushes.Length; i++)
+            brushes[i] = new ImmutableSolidColorBrush(Color.FromArgb(180, (byte)(200 - i * 20), 100, 50));
+        return brushes;
     }
 
     private static Color HsvToColor(double h, double s, double v)

@@ -10,6 +10,8 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
     internal class D2DRenderTargetBitmapImpl(ID2D1BitmapRenderTarget renderTarget) : D2DBitmapImpl(GetBitmap(renderTarget)), IDrawingContextLayerImpl, ILayerFactory
     {
         private readonly ID2D1BitmapRenderTarget _renderTarget = renderTarget;
+        private DrawingContextImpl? _reusableDrawingContext;
+        private bool? _reusableUseScaledDrawing;
 
         public static D2DRenderTargetBitmapImpl CreateCompatible(
             ID2D1RenderTarget renderTarget,
@@ -43,8 +45,23 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
 
         public IDrawingContextImpl CreateDrawingContext(bool useScaledDrawing)
         {
-            return new DrawingContextImpl( this, _renderTarget, useScaledDrawing, 
-                null, () => Version++);
+            Action finishedCallback = () => Version++;
+            if (_reusableDrawingContext is null || _reusableUseScaledDrawing != useScaledDrawing)
+            {
+                _reusableUseScaledDrawing = useScaledDrawing;
+                _reusableDrawingContext = new DrawingContextImpl(
+                    this,
+                    _renderTarget,
+                    useScaledDrawing,
+                    finishedCallback: finishedCallback);
+                _reusableDrawingContext.EnableSessionReuse();
+            }
+            else
+            {
+                _reusableDrawingContext.ReopenSession(finishedCallback: finishedCallback);
+            }
+
+            return _reusableDrawingContext;
         }
 
         public bool IsCorrupted => false;
@@ -76,6 +93,7 @@ namespace MIR.Direct2D1ForAvalonia.Media.Imaging
 
         public override void Dispose()
         {
+            _reusableDrawingContext = null;
             base.Dispose();
             _renderTarget.Dispose();
         }
