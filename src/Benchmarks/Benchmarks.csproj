@@ -13,6 +13,8 @@
   <ItemGroup>
     <ProjectReference Include="..\Direct2D1ForAvalonia\MIR.Direct2D1ForAvalonia.csproj" />
     <ProjectReference Include="..\DirectWriteForAvalonia\MIR.DirectWriteForAvalonia.csproj" />
+    <PackageReference Include="Avalonia.Skia" Version="12.1.0" />
+    <PackageReference Include="Avalonia.HarfBuzz" Version="12.1.0" />
     <PackageReference Include="Avalonia.Win32" Version="12.1.0" />
   </ItemGroup>
 </Project>

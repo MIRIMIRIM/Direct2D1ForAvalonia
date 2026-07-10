@@ -48,6 +48,14 @@ namespace MIR.Direct2D1ForAvalonia.Media
         private static readonly PropertyInfo? s_imageBrushBitmapItemProperty = s_imageBrushBitmapProperty?.PropertyType.GetProperty(
             "Item",
             BindingFlags.Instance | BindingFlags.Public);
+        // Cache of solid-color brushes keyed by (color, opacity), reused across draw calls within
+        // a single DrawingContextImpl lifetime (i.e. one frame). Each entry owns its D2D brush;
+        // BrushImpl.IsCached prevents consumers from disposing it prematurely.
+        private readonly Dictionary<SolidBrushKey, SolidColorBrushImpl> _solidBrushCache = new();
+        // Cache of D2D stroke styles keyed by pen properties. Stroke styles are immutable device
+        // resources — the same pen produces the same ID2D1StrokeStyle every time, so caching avoids
+        // a COM allocation per stroked draw call.
+        private readonly Dictionary<StrokeStyleKey, ID2D1StrokeStyle> _strokeStyleCache = new();
         private RenderOptions _renderOptions;
         private TextOptions _textOptions;
         private readonly Matrix? _postTransform;
@@ -234,6 +242,19 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     }
                     _opacityMaskBrushes.Clear();
 
+                    foreach (var cachedBrush in _solidBrushCache.Values)
+                    {
+                        cachedBrush.IsCached = false;
+                        cachedBrush.Dispose();
+                    }
+                    _solidBrushCache.Clear();
+
+                    foreach (var cachedStroke in _strokeStyleCache.Values)
+                    {
+                        cachedStroke.Dispose();
+                    }
+                    _strokeStyleCache.Clear();
+
                     if (_ownsDeviceContext)
                     {
                         _deviceContext.Dispose();
@@ -413,8 +434,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 var bounds = new Rect(p1, p2);
 
                 using (var d2dBrush = CreateBrush(pen.Brush, bounds))
-                using (var d2dStroke = pen.ToDirect2DStrokeStyle(_deviceContext))
                 {
+                    var d2dStroke = GetOrCreateStrokeStyle(pen);
                     if (d2dBrush.PlatformBrush != null)
                     {
                         _deviceContext.DrawLine(
@@ -451,8 +472,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (pen?.Brush != null)
             {
                 using (var d2dBrush = CreateBrush(pen.Brush, geometry.GetRenderBounds(pen)))
-                using (var d2dStroke = pen.ToDirect2DStrokeStyle(_deviceContext))
                 {
+                    var d2dStroke = GetOrCreateStrokeStyle(pen);
                     if (d2dBrush.PlatformBrush != null)
                     {
                         var impl = (GeometryImpl)geometry;
@@ -472,9 +493,36 @@ namespace MIR.Direct2D1ForAvalonia.Media
             var radiusY = Math.Max(rrect.RadiiTopLeft.Y,
                 Math.Max(rrect.RadiiTopRight.Y, Math.Max(rrect.RadiiBottomRight.Y, rrect.RadiiBottomLeft.Y)));
             var isRounded = !IsZero(radiusX) || !IsZero(radiusY);
-            using var roundedGeometry = isRounded ? CreateRoundedRectGeometry(rrect) : null;
-            using var rectGeometry = isRounded ? null : Direct2D1Platform.Direct2D1Factory.CreateRectangleGeometry(rc);
-            var shapeGeometry = roundedGeometry ?? (ID2D1Geometry)rectGeometry!;
+
+            // Direct2D's native FillRoundedRectangle/DrawRoundedRectangle only support a single
+            // radius pair for all four corners. When all corners share the same radius (the common
+            // case), we can use the native primitives and skip the PathGeometry allocation entirely.
+            // When radii differ per corner, we fall back to a PathGeometry.
+            // The native primitive is only equivalent to the geometry path when no radius
+            // clamping is required. D2D clamps each radius independently to half the extent,
+            // whereas NormalizeRadii (and Skia) scale radii proportionally — the two diverge
+            // once a radius exceeds half of a single dimension. Guard on the unclamped case.
+            var uniformRadius = isRounded
+                && AreRadiiUniform(rrect)
+                && 2 * radiusX <= rect.Width + 0.0001
+                && 2 * radiusY <= rect.Height + 0.0001;
+            var d2dRoundedRect = uniformRadius
+                ? new RoundedRectangle
+                {
+                    Rect = rc,
+                    RadiusX = (float)rrect.RadiiTopLeft.X,
+                    RadiusY = (float)rrect.RadiiTopLeft.Y
+                }
+                : default;
+
+            // Build the PathGeometry only when needed: non-uniform radii, or box shadows
+            // (which require a geometry to cast/inset from). For uniform-radius rects without
+            // shadows, the native D2D FillRoundedRectangle/DrawRoundedRectangle primitives
+            // are used directly — no geometry allocation at all.
+            var needsGeometry = !uniformRadius || boxShadow != default;
+            using var roundedGeometry = (isRounded && needsGeometry) ? CreateRoundedRectGeometry(rrect) : null;
+            using var rectGeometry = (!isRounded && boxShadow != default) ? Direct2D1Platform.Direct2D1Factory.CreateRectangleGeometry(rc) : null;
+            ID2D1Geometry? shapeGeometry = (ID2D1Geometry?)roundedGeometry ?? rectGeometry;
 
             DrawBoxShadows(rrect, shapeGeometry, boxShadow, inset: false);
 
@@ -486,7 +534,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     {
                         if (isRounded)
                         {
-                            _deviceContext.FillGeometry(roundedGeometry!, b.PlatformBrush);
+                            if (uniformRadius)
+                                _deviceContext.FillRoundedRectangle(d2dRoundedRect, b.PlatformBrush);
+                            else
+                                _deviceContext.FillGeometry(roundedGeometry!, b.PlatformBrush);
                         }
                         else
                         {
@@ -501,17 +552,28 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (pen?.Brush != null)
             {
                 using (var wrapper = CreateBrush(pen.Brush, rect))
-                using (var d2dStroke = pen.ToDirect2DStrokeStyle(_deviceContext))
                 {
+                    var d2dStroke = GetOrCreateStrokeStyle(pen);
                     if (wrapper.PlatformBrush != null)
                     {
                         if (isRounded)
                         {
-                            _deviceContext.DrawGeometry(
-                                roundedGeometry!,
-                                wrapper.PlatformBrush,
-                                (float)pen.Thickness,
-                                d2dStroke);
+                            if (uniformRadius)
+                            {
+                                _deviceContext.DrawRoundedRectangle(
+                                    d2dRoundedRect,
+                                    wrapper.PlatformBrush,
+                                    (float)pen.Thickness,
+                                    d2dStroke!);
+                            }
+                            else
+                            {
+                                _deviceContext.DrawGeometry(
+                                    roundedGeometry!,
+                                    wrapper.PlatformBrush,
+                                    (float)pen.Thickness,
+                                    d2dStroke);
+                            }
                         }
                         else
                         {
@@ -524,6 +586,20 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Checks whether all four corner radii of a <see cref="RoundedRect"/> are equal,
+        /// meaning the D2D native rounded-rect primitives can be used instead of a PathGeometry.
+        /// </summary>
+        private static bool AreRadiiUniform(RoundedRect rrect)
+        {
+            return AreClose(rrect.RadiiTopLeft.X, rrect.RadiiTopRight.X)
+                && AreClose(rrect.RadiiTopLeft.X, rrect.RadiiBottomRight.X)
+                && AreClose(rrect.RadiiTopLeft.X, rrect.RadiiBottomLeft.X)
+                && AreClose(rrect.RadiiTopLeft.Y, rrect.RadiiTopRight.Y)
+                && AreClose(rrect.RadiiTopLeft.Y, rrect.RadiiBottomRight.Y)
+                && AreClose(rrect.RadiiTopLeft.Y, rrect.RadiiBottomLeft.Y);
         }
 
         public void DrawRegion(IBrush? brush, IPen? pen, IPlatformRenderInterfaceRegion region)
@@ -551,8 +627,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (pen?.Brush != null)
             {
                 using (var d2dBrush = CreateBrush(pen.Brush, bounds.Inflate(pen.Thickness / 2)))
-                using (var d2dStroke = pen.ToDirect2DStrokeStyle(_deviceContext))
                 {
+                    var d2dStroke = GetOrCreateStrokeStyle(pen);
                     if (d2dBrush.PlatformBrush != null)
                     {
                         _deviceContext.DrawGeometry(
@@ -589,8 +665,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (pen?.Brush != null)
             {
                 using (var wrapper = CreateBrush(pen.Brush, rect))
-                using (var d2dStroke = pen.ToDirect2DStrokeStyle(_deviceContext))
                 {
+                    var d2dStroke = GetOrCreateStrokeStyle(pen);
                     if (wrapper.PlatformBrush != null)
                     {
                         _deviceContext.DrawEllipse(new Ellipse
@@ -835,7 +911,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         private void DrawBoxShadows(
             RoundedRect roundedRect,
-            ID2D1Geometry originalGeometry,
+            ID2D1Geometry? originalGeometry,
             BoxShadows boxShadows,
             bool inset)
         {
@@ -850,9 +926,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 }
 
                 if (inset)
-                    DrawInsetBoxShadow(roundedRect, originalGeometry, shadow);
+                    DrawInsetBoxShadow(roundedRect, originalGeometry!, shadow);
                 else
-                    DrawOuterBoxShadow(roundedRect, originalGeometry, shadow);
+                    DrawOuterBoxShadow(roundedRect, originalGeometry!, shadow);
             }
         }
 
@@ -1282,7 +1358,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
             if (solidColorBrush != null)
             {
-                return new SolidColorBrushImpl(solidColorBrush, _deviceContext);
+                return GetOrCreateSolidBrush(solidColorBrush);
             }
             else if (linearGradientBrush != null)
             {
@@ -1366,7 +1442,49 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 }
             }
 
-            return new SolidColorBrushImpl(null, _deviceContext);
+            return GetOrCreateSolidBrush(null);
+        }
+
+        /// <summary>
+        /// Returns a cached <see cref="SolidColorBrushImpl"/> for the given color+opacity,
+        /// creating one on first use. Cached brushes are disposed when the drawing context
+        /// itself is disposed, not by individual draw calls.
+        /// </summary>
+        private SolidColorBrushImpl GetOrCreateSolidBrush(ISolidColorBrush? brush)
+        {
+            var color = brush?.Color ?? default;
+            var opacity = brush?.Opacity ?? 1.0;
+            var key = new SolidBrushKey(color, opacity);
+
+            if (_solidBrushCache.TryGetValue(key, out var cached))
+                return cached;
+
+            var impl = new SolidColorBrushImpl(brush, _deviceContext)
+            {
+                IsCached = true
+            };
+            _solidBrushCache[key] = impl;
+            return impl;
+        }
+
+        /// <summary>
+        /// Returns a cached <see cref="ID2D1StrokeStyle"/> for the given pen, creating one
+        /// on first use. D2D stroke styles are immutable device resources — the same pen
+        /// properties always produce an identical stroke style, so caching avoids a COM
+        /// allocation per stroked draw call.
+        /// </summary>
+        private ID2D1StrokeStyle? GetOrCreateStrokeStyle(IPen? pen)
+        {
+            if (pen is null)
+                return null;
+
+            var key = new StrokeStyleKey(pen);
+            if (_strokeStyleCache.TryGetValue(key, out var cached))
+                return cached;
+
+            var style = pen.ToDirect2DStrokeStyle(_deviceContext);
+            _strokeStyleCache[key] = style;
+            return style;
         }
 
         public void PushGeometryClip(IGeometryImpl clip)
@@ -1495,5 +1613,79 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 _ => TextAntialiasMode.Default
             };
         }
+    }
+
+    /// <summary>
+    /// A composite key for caching solid-color D2D brushes by color and opacity.
+    /// </summary>
+    internal readonly struct SolidBrushKey : IEquatable<SolidBrushKey>
+    {
+        // ARGB in the upper 32 bits, quantized opacity in the lower 32 bits. Kept as
+        // distinct halves of a 64-bit value so no two (color, opacity) pairs can collide.
+        private readonly ulong _colorAndOpacity;
+
+        public SolidBrushKey(Color color, double opacity)
+        {
+            var argb = (uint)((color.A << 24) | (color.R << 16) | (color.G << 8) | color.B);
+            // Quantize opacity to 1/65535 resolution to avoid floating-point key drift.
+            var op = (uint)Math.Clamp(Math.Round(opacity * 65535.0), 0, 65535);
+            _colorAndOpacity = ((ulong)argb << 32) | op;
+        }
+
+        public bool Equals(SolidBrushKey other) => _colorAndOpacity == other._colorAndOpacity;
+        public override bool Equals(object? obj) => obj is SolidBrushKey other && Equals(other);
+        public override int GetHashCode() => _colorAndOpacity.GetHashCode();
+    }
+
+    /// <summary>
+    /// A composite key for caching D2D stroke styles by pen properties.
+    /// Stroke styles are immutable device resources identified by their cap/join/dash properties.
+    /// </summary>
+    internal readonly struct StrokeStyleKey : IEquatable<StrokeStyleKey>
+    {
+        private readonly PenLineCap _lineCap;
+        private readonly PenLineJoin _lineJoin;
+        private readonly float _miterLimit;
+        private readonly Vortice.Direct2D1.DashStyle _dashStyle;
+        private readonly float _dashOffset;
+        private readonly int _dashHash;
+
+        public StrokeStyleKey(IPen pen)
+        {
+            _lineCap = pen.LineCap;
+            _lineJoin = pen.LineJoin;
+            _miterLimit = (float)pen.MiterLimit;
+
+            var dashStyle = pen.DashStyle;
+            if (dashStyle?.Dashes is { Count: > 0 } dashes)
+            {
+                _dashStyle = Vortice.Direct2D1.DashStyle.Custom;
+                _dashOffset = (float)dashStyle.Offset;
+                // Hash the dash array values
+                var hash = 17;
+                for (var i = 0; i < dashes.Count; i++)
+                    hash = (hash * 31) + ((float)dashes[i]).GetHashCode();
+                _dashHash = hash;
+            }
+            else
+            {
+                _dashStyle = Vortice.Direct2D1.DashStyle.Solid;
+                _dashOffset = 0;
+                _dashHash = 0;
+            }
+        }
+
+        public bool Equals(StrokeStyleKey other) =>
+            _lineCap == other._lineCap
+            && _lineJoin == other._lineJoin
+            && _miterLimit == other._miterLimit
+            && _dashStyle == other._dashStyle
+            && _dashOffset == other._dashOffset
+            && _dashHash == other._dashHash;
+
+        public override bool Equals(object? obj) => obj is StrokeStyleKey other && Equals(other);
+
+        public override int GetHashCode() =>
+            HashCode.Combine(_lineCap, _lineJoin, _miterLimit, _dashStyle, _dashOffset, _dashHash);
     }
 }

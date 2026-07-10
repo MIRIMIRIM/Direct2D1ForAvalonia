@@ -14,9 +14,17 @@ using Avalonia.Media.Imaging;
 using Avalonia.Media.TextFormatting;
 using Avalonia.Platform;
 using Avalonia.Win32;
+using Benchmarks;
 
 if (!OperatingSystem.IsWindows())
     throw new PlatformNotSupportedException("Benchmarks target Windows only.");
+
+// Route to D2D-vs-Skia rendering benchmark if requested.
+if (args.Length > 0 && (args[0] == "--bench-render" || args[0] == "--bench-render-worker"))
+{
+    var renderOptions = RenderBenchmarkOptions.Parse(args);
+    return RenderBenchmarkCommand.Run(renderOptions);
+}
 
 TryStabilizeProcessScheduling();
 
