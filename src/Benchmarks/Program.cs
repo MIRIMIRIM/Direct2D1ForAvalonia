@@ -30,6 +30,11 @@ if (args.Length > 0 && args[0] == "--bench-windowed")
     return WindowedRenderBenchmarkCommand.Run(args);
 }
 
+if (args.Length > 0 && args[0] == "--bench-device-cl")
+{
+    return DeviceClProofCommand.Run(args);
+}
+
 if (args.Length > 0 && (args[0] == "--bench-render" || args[0] == "--bench-render-worker"))
 {
     var renderOptions = RenderBenchmarkOptions.Parse(args);

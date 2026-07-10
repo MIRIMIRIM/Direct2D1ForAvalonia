@@ -20,10 +20,6 @@ namespace MIR.Direct2D1ForAvalonia.Media;
 /// </summary>
 internal sealed class D2DDeviceResourceCache
 {
-    // Shared by all ID2D1DeviceContext instances from the same ID2D1Device (window surface +
-    // composition intermediates + GPU-compatible layers).
-    private static readonly ConditionalWeakTable<ID2D1Device, D2DDeviceResourceCache> s_deviceCaches = new();
-
     // Fallback for non-device-context targets (e.g. pure WIC RT without a device association).
     private static readonly ConditionalWeakTable<ID2D1RenderTarget, D2DDeviceResourceCache> s_renderTargetCaches = new();
 
@@ -37,24 +33,33 @@ internal sealed class D2DDeviceResourceCache
     // paint) still hit steady-state DrawImage replay.
     private readonly Dictionary<CommandListKey, ID2D1CommandList> _commandLists = new();
     private readonly LinkedList<CommandListKey> _commandListLru = new();
+    private int _commandListHits;
+    private int _commandListStores;
+
+    /// <summary>Device-scoped command-list lookup hits (steady intermediate repaints).</summary>
+    public int CommandListHits => _commandListHits;
+
+    /// <summary>Device-scoped command-list stores (first paint / content change).</summary>
+    public int CommandListStores => _commandListStores;
+
+    public void ResetCommandListStats()
+    {
+        _commandListHits = 0;
+        _commandListStores = 0;
+    }
+
+    // Single process-wide GPU cache. Do not key ConditionalWeakTable on deviceContext.Device:
+    // COM RCWs for the same native ID2D1Device are often distinct managed objects, which would
+    // split the cache per call and prevent command-list / brush reuse across frames.
+    private static D2DDeviceResourceCache? s_platformGpuCache;
 
     public static D2DDeviceResourceCache For(ID2D1RenderTarget renderTarget)
     {
-        // Device-context path: share one cache for the whole D2D device.
-        if (renderTarget is ID2D1DeviceContext deviceContext)
-        {
-            try
-            {
-                var device = deviceContext.Device;
-                if (device is not null)
-                    return s_deviceCaches.GetValue(device, static _ => new D2DDeviceResourceCache());
-            }
-            catch
-            {
-                // Fall through to per-RT cache if Device is unavailable.
-            }
-        }
+        // GPU device-context path (window, offscreen, composition intermediates).
+        if (renderTarget is ID2D1DeviceContext)
+            return s_platformGpuCache ??= new D2DDeviceResourceCache();
 
+        // Classic WIC / factory RTs: still per-render-target.
         return s_renderTargetCaches.GetValue(renderTarget, static _ => new D2DDeviceResourceCache());
     }
 
@@ -153,6 +158,7 @@ internal sealed class D2DDeviceResourceCache
         if (_commandLists.TryGetValue(key, out var cached) && cached is not null)
         {
             TouchCommandList(key);
+            _commandListHits++;
             commandList = cached;
             return true;
         }
@@ -173,6 +179,7 @@ internal sealed class D2DDeviceResourceCache
                 existing.Dispose();
             _commandLists[key] = commandList;
             TouchCommandList(key);
+            _commandListStores++;
             return;
         }
 
@@ -186,6 +193,7 @@ internal sealed class D2DDeviceResourceCache
 
         _commandLists[key] = commandList;
         _commandListLru.AddLast(key);
+        _commandListStores++;
     }
 
     private void TouchCommandList(CommandListKey key)

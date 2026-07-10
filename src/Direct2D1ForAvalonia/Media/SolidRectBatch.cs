@@ -49,6 +49,18 @@ internal sealed class SolidRectBatch
     /// <summary>Command-list rebuilds / misses this process.</summary>
     public int CommandListMisses { get; private set; }
 
+    /// <summary>Debug: EndSession took deferred simple path.</summary>
+    public int DebugDeferredEnds { get; private set; }
+
+    /// <summary>Debug: EndSession took live stroke-flush path.</summary>
+    public int DebugLiveEnds { get; private set; }
+
+    /// <summary>Debug: ops recorded in last completed session.</summary>
+    public int DebugLastOpCount { get; private set; }
+
+    /// <summary>Debug: last command-list record failure message.</summary>
+    public string? DebugLastRecordError { get; private set; }
+
     public void BeginSession(bool enableCommandListReuse, int pixelWidth = 0, int pixelHeight = 0)
     {
         _strokes.Clear();
@@ -77,10 +89,13 @@ internal sealed class SolidRectBatch
         if (!_active)
             return;
 
-        // Leaving the simple-only path: materialise anything deferred, drop CL cache.
+        // Empty session (e.g. RenderOptions set before any draw): keep simple/CL eligibility.
+        if (_ops.Count == 0 && _strokes.Count == 0)
+            return;
+
+        // Leaving the simple-only path: materialise anything deferred.
         if (_deferSimpleSession && _ops.Count > 0)
         {
-            _deferSimpleSession = false;
             ExecuteOps(dc, resources, buildStrokeBatch: true);
             _ops.Clear();
         }
@@ -90,6 +105,7 @@ internal sealed class SolidRectBatch
         }
 
         // Do not wipe the device-scoped CL cache — other visuals may still use those entries.
+        _deferSimpleSession = false;
         _sessionOnlySimple = false;
     }
 
@@ -133,7 +149,8 @@ internal sealed class SolidRectBatch
         MixHash(op);
         _ops.Add(op);
 
-        if (_deferSimpleSession)
+        // Defer only while this session remains simple-only (CL candidate).
+        if (_deferSimpleSession && _sessionOnlySimple)
         {
             // Only logging — EndSession will DrawImage(CL) or execute+rebuild.
             return true;
@@ -194,31 +211,42 @@ internal sealed class SolidRectBatch
     /// <summary>
     /// Completes the session: command-list replay, or flush strokes / rebuild CL for next frame.
     /// </summary>
-    public void EndSession(ID2D1DeviceContext dc, D2DDeviceResourceCache resources)
+    /// <param name="sessionTarget">
+    /// The render target image that was bound for this session (preferred over reading dc.Target).
+    /// </param>
+    public void EndSession(
+        ID2D1DeviceContext dc,
+        D2DDeviceResourceCache resources,
+        ID2D1Image? sessionTarget = null)
     {
         if (!_active)
             return;
 
         try
         {
+            DebugLastOpCount = _ops.Count;
             if (_deferSimpleSession && _sessionOnlySimple && _ops.Count > 0)
             {
+                DebugDeferredEnds++;
                 if (resources.TryGetCommandList(_sessionHash, _pixelW, _pixelH, out var cached))
                 {
+                    // Steady-state: one DrawImage replaces N fills + strokes (composition intermediate
+                    // dirty repaint when content hash matches a prior paint on this device).
                     CommandListHits++;
                     dc.DrawImage(cached);
                     return;
                 }
 
-                // Hash miss: record into a device-scoped CL and draw once.
+                // Cold / content-changed: paint with multi-stroke batching, then store a CL for
+                // the next identical session (including a brand-new DrawingContextImpl).
                 CommandListMisses++;
-                if (!TryRecordOpsToCommandListAndDraw(dc, resources))
-                    ExecuteOps(dc, resources, buildStrokeBatch: true);
-
+                ExecuteOps(dc, resources, buildStrokeBatch: true);
+                TryRecordOpsToCommandListStoreOnly(dc, resources, sessionTarget);
                 return;
             }
 
             // Live path (no session deferral): flush deferred strokes only.
+            DebugLiveEnds++;
             FlushStrokes(dc, resources);
         }
         finally
@@ -306,40 +334,55 @@ internal sealed class SolidRectBatch
             FlushStrokes(dc, resources);
     }
 
-    private bool TryRecordOpsToCommandListAndDraw(
+    /// <summary>
+    /// Records the session ops into a command list and stores it on the device cache without
+    /// presenting again (caller already painted via <see cref="ExecuteOps"/>).
+    /// </summary>
+    private bool TryRecordOpsToCommandListStoreOnly(
         ID2D1DeviceContext dc,
-        D2DDeviceResourceCache resources)
+        D2DDeviceResourceCache resources,
+        ID2D1Image? sessionTarget)
     {
-        ID2D1Image? previousTarget;
-        try
-        {
-            previousTarget = dc.Target;
-        }
-        catch
-        {
+        // Ops list is still intact until EndSession finally-block.
+        if (_ops.Count == 0)
             return false;
+
+        ID2D1Image? previousTarget = sessionTarget;
+        if (previousTarget is null)
+        {
+            try { previousTarget = dc.Target; }
+            catch { return false; }
         }
 
         if (previousTarget is null)
             return false;
 
-        var cl = dc.CreateCommandList();
+        ID2D1CommandList? cl = null;
         try
         {
+            DebugLastRecordError = null;
+            cl = dc.CreateCommandList();
+            if (cl is null)
+            {
+                DebugLastRecordError = "CreateCommandList returned null";
+                return false;
+            }
+
             dc.Target = cl;
+            // Re-walk ops into the command list (second pass, cold frame only).
             ExecuteOps(dc, resources, buildStrokeBatch: true);
             cl.Close();
 
             dc.Target = previousTarget;
-            dc.DrawImage(cl);
-
             resources.StoreCommandList(_sessionHash, _pixelW, _pixelH, cl);
+            cl = null;
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            DebugLastRecordError = ex.GetType().Name + ": " + ex.Message;
             try { dc.Target = previousTarget; } catch { /* ignore */ }
-            cl.Dispose();
+            cl?.Dispose();
             return false;
         }
     }

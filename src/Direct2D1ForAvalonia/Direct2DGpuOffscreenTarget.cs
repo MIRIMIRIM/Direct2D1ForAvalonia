@@ -5,6 +5,7 @@ using Avalonia;
 using Avalonia.Platform;
 using MIR.Direct2D1ForAvalonia.Media;
 using MIR.Direct2D1ForAvalonia.Media.Imaging;
+using Vortice.Direct2D1;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
 using Vortice.Mathematics;
@@ -104,9 +105,16 @@ namespace MIR.Direct2D1ForAvalonia
         /// BeginDraw on entry and EndDraw on Dispose. The underlying <see cref="DrawingContextImpl"/>
         /// is reused across frames to avoid per-frame stack/cache reallocations.
         /// </summary>
-        public IDrawingContextImpl CreateDrawingContext()
+        /// <param name="forceNewInstance">
+        /// When true, allocates a fresh <see cref="DrawingContextImpl"/> (composition-like:
+        /// new intermediate host each paint). Device-scoped command lists should still hit.
+        /// </param>
+        public IDrawingContextImpl CreateDrawingContext(bool forceNewInstance = false)
         {
             EnsureNotDisposed();
+            if (forceNewInstance)
+                _reusableContext = null;
+
             if (_reusableContext is null)
             {
                 _reusableContext = new DrawingContextImpl(this, _deviceContext, useScaledDrawing: false);
@@ -136,6 +144,22 @@ namespace MIR.Direct2D1ForAvalonia
             var mapped = context.Map(_staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
             context.Unmap(_staging, 0);
             _ = mapped;
+        }
+
+        /// <summary>
+        /// Device-scoped simple-session command-list stats (hits across DC instances).
+        /// </summary>
+        public (int Hits, int Stores) GetDeviceCommandListStats()
+        {
+            EnsureNotDisposed();
+            var cache = D2DDeviceResourceCache.For(_deviceContext);
+            return (cache.CommandListHits, cache.CommandListStores);
+        }
+
+        public void ResetDeviceCommandListStats()
+        {
+            EnsureNotDisposed();
+            D2DDeviceResourceCache.For(_deviceContext).ResetCommandListStats();
         }
 
         /// <summary>

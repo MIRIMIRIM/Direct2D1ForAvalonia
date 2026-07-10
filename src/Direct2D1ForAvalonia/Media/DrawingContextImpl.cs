@@ -75,6 +75,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
         // collections, which depend only on stops+spread (not geometry) and so recur every frame.
         private readonly D2DDeviceResourceCache _deviceResources;
         private readonly SolidRectBatch _solidRectBatch = new();
+        // Captured at session open for command-list record (dc.Target can be awkward mid-frame).
+        private ID2D1Image? _sessionTargetImage;
         // Same-pen opaque line batch (MixedScene grid lines, separators, etc.).
         private readonly List<(Point A, Point B)> _lineBatch = new(32);
         private Color _lineBatchColor;
@@ -183,8 +185,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
         }
 
         /// <summary>Command-list cache stats for diagnostics (simple solid-rect sessions only).</summary>
-        internal (int Hits, int Misses) CommandListStats
-            => (_solidRectBatch.CommandListHits, _solidRectBatch.CommandListMisses);
+        internal (int Hits, int Misses, int DeferredEnds, int LiveEnds, int LastOps, string? RecordError) CommandListStats
+            => (_solidRectBatch.CommandListHits, _solidRectBatch.CommandListMisses,
+                _solidRectBatch.DebugDeferredEnds, _solidRectBatch.DebugLiveEnds,
+                _solidRectBatch.DebugLastOpCount, _solidRectBatch.DebugLastRecordError);
 
         /// <summary>
         /// Reopens a previously disposed drawing context for another frame on the same device
@@ -253,6 +257,15 @@ namespace MIR.Direct2D1ForAvalonia.Media
             // device-level CL still hits across those instances.
             _solidRectBatch.BeginSession(enableCommandListReuse: true, pw, ph);
             DrawingContextCallStats.OnSessionOpen(_diagnosticTargetName);
+            try
+            {
+                _sessionTargetImage = _deviceContext.Target;
+            }
+            catch
+            {
+                _sessionTargetImage = null;
+            }
+
             _deviceContext.BeginDraw();
 
             // Reset world transform so a reused context never inherits the previous frame's matrix.
@@ -385,6 +398,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
             get { return _transform; }
             set
             {
+                // Identity no-ops (Avalonia often resets transform) must not kill CL deferral.
+                if (value == _transform)
+                    return;
+
                 FlushPrimitiveBatch();
                 FlushDeferredClip();
                 _transform = value;
@@ -397,8 +414,16 @@ namespace MIR.Direct2D1ForAvalonia.Media
             get => _renderOptions;
             set
             {
-                // AA / blend changes must not apply mid-batch or to a stale command list.
-                FlushPrimitiveBatch();
+                // AA / blend changes must not apply mid-batch. Empty sessions stay CL-eligible
+                // (Avalonia often sets options before the first primitive).
+                if (_solidRectBatch.HasDeferredStrokes
+                    || _solidRectBatch.IsDeferredSimpleSession
+                    || _lineBatchActive
+                    || _ellipseStrokeBatchActive)
+                {
+                    FlushPrimitiveBatch();
+                }
+
                 _renderOptions = value;
                 ApplyRenderOptions(value);
             }
@@ -459,7 +484,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 // Line / ellipse stroke batches, then solid-rect stroke batch + optional CL replay.
                 FlushLineBatch();
                 FlushEllipseStrokeBatch();
-                _solidRectBatch.EndSession(_deviceContext, _deviceResources);
+                _solidRectBatch.EndSession(_deviceContext, _deviceResources, _sessionTargetImage);
 
                 Direct2D1FrameProfiler.MarkEndDrawStart(
                     _softPathHits, _softPathMisses, _layerPushes, _deferredClipFlushes,
@@ -977,6 +1002,8 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 }
             }
 
+            // Axis-aligned clip (PushClip rect) is compatible with simple solid batching;
+            // only geometric deferred clips force a full flush (handled in FlushDeferredClip).
             return _solidRectBatch.HandleSimpleRect(
                 _deviceContext,
                 _deviceResources,
@@ -1831,10 +1858,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// </summary>
         private void FlushDeferredClip()
         {
-            // Solid-rect stroke batch must land before clip/layer state changes.
-            if (_solidRectBatch.HasDeferredStrokes || _solidRectBatch.IsDeferredSimpleSession)
-                FlushPrimitiveBatch();
-
             // Standalone soft opacity cannot stay deferred across a hard clip/layer boundary.
             FlushStandaloneSoftOpacity();
 
@@ -1844,6 +1867,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
             var top = _clipStack.Peek();
             if (top.State is not (ClipState.Deferred or ClipState.SoftMerged))
                 return;
+
+            // Materialising a geometric clip — must emit deferred solid primitives first
+            // (and end any simple-session CL deferral for this frame).
+            FlushPrimitiveBatch();
 
             _clipStack.Pop();
             _deferredClipFlushes++;
