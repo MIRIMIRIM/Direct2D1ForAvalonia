@@ -486,3 +486,7 @@ $RECYCLE.BIN/
 **/report.md
 /.vscode
 *.lscache
+
+
+/.zcode
+/.claude
