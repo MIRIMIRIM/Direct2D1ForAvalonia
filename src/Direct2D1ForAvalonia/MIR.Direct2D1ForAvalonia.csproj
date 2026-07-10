@@ -5,7 +5,7 @@
     <PackageId>MIR.Direct2D1ForAvalonia</PackageId>
     <RootNamespace>MIR.Direct2D1ForAvalonia</RootNamespace>
     <Title>MIR.Direct2D1ForAvalonia</Title>
-    <Version>12.0.0.4</Version>
+    <Version>12.1.0.0</Version>
     <Description>Direct2D1 rendering backend for Avalonia 12 on Windows, maintained as an independent derivative.</Description>
     <PackageTags>Avalonia;Direct2D1;DirectWrite;Win32;Rendering;Graphics;Fonts</PackageTags>
   </PropertyGroup>
