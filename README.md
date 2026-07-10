@@ -1,6 +1,6 @@
 # MIR.Direct2D1ForAvalonia
 
-Independent derivative of the deprecated Avalonia Direct2D1 backend, updated for Avalonia `12.0.0`.
+Independent derivative of the deprecated Avalonia Direct2D1 backend, updated for Avalonia `12.1.0`.
 
 This project is not affiliated with or endorsed by AvaloniaUI OÜ.
 
@@ -59,7 +59,7 @@ Licensing:
 
 Packaging:
 
-- Packages target Avalonia `12.0.0`; NuGet package versions come from the `<Version>` values in the package projects.
+- Packages target Avalonia `12.1.0`; NuGet package versions come from the `<Version>` values in the package projects.
 - Pack with `dotnet pack src/DirectWriteFontsForAvalonia/MIR.DirectWriteFontsForAvalonia.csproj -c Release`
 - Pack with `dotnet pack src/Direct2D1ForAvalonia/MIR.Direct2D1ForAvalonia.csproj -c Release`
 - Pack with `dotnet pack src/DirectWriteForAvalonia/MIR.DirectWriteForAvalonia.csproj -c Release`
