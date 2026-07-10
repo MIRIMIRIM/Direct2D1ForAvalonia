@@ -15,6 +15,13 @@ namespace MIR.Direct2D1ForAvalonia.Media
     internal class WicBitmapImpl : BitmapImpl, IReadableBitmapImpl
     {
         private readonly IWICBitmapDecoder? _decoder;
+        // Device-scoped GPU upload of this WIC source. Invalidated on Version++ (pixel write)
+        // and when the D2D device changes. Avoids CreateFormatConverter + CreateBitmapFromWicBitmap
+        // on every DrawBitmap for static images.
+        private readonly object _gpuUploadLock = new();
+        private ID2D1Bitmap1? _gpuUpload;
+        private IntPtr _gpuUploadDevice;
+        private int _gpuUploadVersion;
 
         private static BitmapInterpolationMode ConvertInterpolationMode(Avalonia.Media.Imaging.BitmapInterpolationMode interpolationMode)
         {
@@ -239,6 +246,13 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public override void Dispose()
         {
+            lock (_gpuUploadLock)
+            {
+                _gpuUpload?.Dispose();
+                _gpuUpload = null;
+                _gpuUploadDevice = IntPtr.Zero;
+            }
+
             WicImpl.Dispose();
             _decoder?.Dispose();
         }
@@ -255,15 +269,71 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <returns>The Direct2D bitmap.</returns>
         public override OptionalDispose<ID2D1Bitmap1> GetDirect2DBitmap(ID2D1RenderTarget renderTarget)
         {
+            var device = TryGetNativeDevicePointer(renderTarget);
+
+            // GPU / device-context path: cache one upload per WIC bitmap × device × Version.
+            // Factory WIC RTs (device == 0) still upload each call — rare for image blits.
+            if (device != IntPtr.Zero)
+            {
+                lock (_gpuUploadLock)
+                {
+                    if (_gpuUpload is not null
+                        && _gpuUploadDevice == device
+                        && _gpuUploadVersion == Version)
+                    {
+                        return new OptionalDispose<ID2D1Bitmap1>(_gpuUpload, dispose: false);
+                    }
+
+                    _gpuUpload?.Dispose();
+                    _gpuUpload = null;
+
+                    var uploaded = CreateGpuBitmap(renderTarget);
+                    _gpuUpload = uploaded;
+                    _gpuUploadDevice = device;
+                    _gpuUploadVersion = Version;
+                    return new OptionalDispose<ID2D1Bitmap1>(uploaded, dispose: false);
+                }
+            }
+
+            return new OptionalDispose<ID2D1Bitmap1>(CreateGpuBitmap(renderTarget), dispose: true);
+        }
+
+        private ID2D1Bitmap1 CreateGpuBitmap(ID2D1RenderTarget renderTarget)
+        {
             using var converter = Direct2D1Platform.ImagingFactory.CreateFormatConverter();
             converter.Initialize(WicImpl, Vortice.WIC.PixelFormat.Format32bppPBGRA);
 
             // CreateBitmapFromWicBitmap returns an ID2D1Bitmap RCW; QI to Bitmap1 and dispose the
             // intermediate so each upload does not leave a COM ref for the finalizer.
             using var bitmap = renderTarget.CreateBitmapFromWicBitmap(converter);
-            var d2dBitmap = bitmap.QueryInterface<ID2D1Bitmap1>();
+            return bitmap.QueryInterface<ID2D1Bitmap1>();
+        }
 
-            return new OptionalDispose<ID2D1Bitmap1>(d2dBitmap, true);
+        private static IntPtr TryGetNativeDevicePointer(ID2D1RenderTarget renderTarget)
+        {
+            if (renderTarget is ID2D1DeviceContext dc)
+            {
+                try
+                {
+                    using var device = dc.Device;
+                    return device?.NativePointer ?? IntPtr.Zero;
+                }
+                catch
+                {
+                    return IntPtr.Zero;
+                }
+            }
+
+            try
+            {
+                using var asDc = renderTarget.QueryInterface<ID2D1DeviceContext>();
+                using var device = asDc.Device;
+                return device?.NativePointer ?? IntPtr.Zero;
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
         }
 
         protected internal override void Save(Stream stream, ContainerFormat containerFormat, int? quality)

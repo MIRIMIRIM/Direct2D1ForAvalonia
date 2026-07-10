@@ -58,6 +58,24 @@ namespace MIR.Direct2D1ForAvalonia.Media
         private readonly Stack<ClipEntry> _clipStack = new Stack<ClipEntry>();
         // Number of soft-merged opacities that did not push a D2D layer (PopOpacity is a no-op).
         private int _softOpacityDepth;
+        // Deferred single solid rect under SoftMerged opacity. Emitted on PopOpacity via soft bake
+        // when it remains the only draw; a second incompatible draw materialises a real layer first.
+        // This preserves group transparency (multi-draw opacity groups) while accelerating the
+        // common ClipLayerHeavy pattern: PushClip(rounded) + PushOpacity + one solid fill.
+        private bool _softOpacityPending;
+        private RoundedRect _softOpacityPendingRrect;
+        private ISolidColorBrush? _softOpacityPendingFill;
+        private ISolidColorBrush? _softOpacityPendingStroke;
+        private float _softOpacityPendingStrokeThickness;
+        private ID2D1StrokeStyle? _softOpacityPendingStrokeStyle;
+        private bool _softOpacityPendingPaintClipShape;
+        // Standalone PushOpacity (no preceding deferred rounded clip): defer solid rects and soft-
+        // bake when they are pairwise non-overlapping (group transparency ≡ per-primitive bake).
+        // MixedScene gold chips under PushOpacity(0.5) hit this path. Overlap or non-solid → layer.
+        private int _pureSoftOpacityDepth;
+        private float _pureSoftOpacity = 1f;
+        private bool _pureSoftOpacityLayerOpen;
+        private readonly List<PureSoftOpacityOp> _pureSoftOpacityOps = new(8);
         // Lightweight counters for offscreen vs real-window profiling (reset each session).
         private int _softPathHits;
         private int _softPathMisses;
@@ -352,6 +370,219 @@ namespace MIR.Direct2D1ForAvalonia.Media
             _solidRectBatch.MarkNonSimple(_deviceContext, _deviceResources);
         }
 
+        /// <summary>
+        /// Non-rect draws under pure soft opacity must open a real layer first so deferred solids
+        /// composite as a group. Rect draws use <see cref="TryDrawRectangleWithPureSoftOpacity"/>.
+        /// </summary>
+        private void EnsurePureSoftOpacityAllowsNonRect()
+        {
+            if (_pureSoftOpacityDepth > 0 && !_pureSoftOpacityLayerOpen)
+                MaterializePureSoftOpacityLayer();
+        }
+
+        private bool TryDrawRectangleWithPureSoftOpacity(
+            IBrush? brush,
+            IPen? pen,
+            RoundedRect rrect,
+            BoxShadows boxShadow)
+        {
+            if (_pureSoftOpacityDepth == 0 || _pureSoftOpacityLayerOpen)
+                return false;
+            if (boxShadow != default)
+            {
+                MaterializePureSoftOpacityLayer();
+                return false;
+            }
+
+            ISolidColorBrush? solidFill = null;
+            if (brush is not null)
+            {
+                if (brush is not ISolidColorBrush sf)
+                {
+                    MaterializePureSoftOpacityLayer();
+                    return false;
+                }
+                solidFill = sf;
+            }
+
+            ISolidColorBrush? solidStroke = null;
+            float strokeThickness = 0;
+            ID2D1StrokeStyle? strokeStyle = null;
+            if (pen is not null)
+            {
+                if (pen.Brush is not ISolidColorBrush sp || pen.Thickness <= 0)
+                {
+                    MaterializePureSoftOpacityLayer();
+                    return false;
+                }
+                solidStroke = sp;
+                strokeThickness = (float)pen.Thickness;
+                strokeStyle = GetOrCreateStrokeStyle(pen);
+            }
+
+            if (solidFill is null && solidStroke is null)
+                return false;
+
+            var radiusX = Math.Max(rrect.RadiiTopLeft.X,
+                Math.Max(rrect.RadiiTopRight.X, Math.Max(rrect.RadiiBottomRight.X, rrect.RadiiBottomLeft.X)));
+            var radiusY = Math.Max(rrect.RadiiTopLeft.Y,
+                Math.Max(rrect.RadiiTopRight.Y, Math.Max(rrect.RadiiBottomRight.Y, rrect.RadiiBottomLeft.Y)));
+            var isRounded = !IsZero(radiusX) || !IsZero(radiusY);
+            if (isRounded
+                && (!AreRadiiUniform(rrect)
+                    || 2 * radiusX > rrect.Rect.Width + 0.0001
+                    || 2 * radiusY > rrect.Rect.Height + 0.0001))
+            {
+                MaterializePureSoftOpacityLayer();
+                return false;
+            }
+
+            // Cap deferred ops — pathological deep trees fall back to a layer.
+            if (_pureSoftOpacityOps.Count >= 32)
+            {
+                MaterializePureSoftOpacityLayer();
+                return false;
+            }
+
+            _pureSoftOpacityOps.Add(new PureSoftOpacityOp(
+                rrect,
+                isRounded,
+                isRounded ? (float)rrect.RadiiTopLeft.X : 0,
+                isRounded ? (float)rrect.RadiiTopLeft.Y : 0,
+                solidFill,
+                solidStroke,
+                strokeThickness,
+                strokeStyle));
+            return true;
+        }
+
+        private void MaterializePureSoftOpacityLayer()
+        {
+            if (_pureSoftOpacityDepth == 0 || _pureSoftOpacityLayerOpen)
+                return;
+
+            var parameters = new LayerParameters
+            {
+                MaskTransform = Matrix3x2.Identity,
+                Opacity = _pureSoftOpacity
+            };
+            PushDirect2DLayer(parameters);
+            _pureSoftOpacityLayerOpen = true;
+
+            for (var i = 0; i < _pureSoftOpacityOps.Count; i++)
+            {
+                var op = _pureSoftOpacityOps[i];
+                DrawImmediateSolidRounded(
+                    op.Rrect, op.IsRounded, op.RadiusX, op.RadiusY,
+                    op.Fill, op.Stroke, op.StrokeThickness, op.StrokeStyle,
+                    groupOpacity: 1f);
+            }
+
+            _pureSoftOpacityOps.Clear();
+            _softPathMisses++;
+            DrawingContextCallStats.OnSoftMiss();
+        }
+
+        /// <summary>
+        /// Closes pure soft opacity: soft-bake non-overlapping solids, or a real layer when needed.
+        /// </summary>
+        private void FlushPureSoftOpacity(bool forceLayer)
+        {
+            if (_pureSoftOpacityDepth == 0)
+                return;
+
+            if (_pureSoftOpacityLayerOpen)
+            {
+                PopLayer();
+                _pureSoftOpacityLayerOpen = false;
+                _pureSoftOpacityDepth = 0;
+                _pureSoftOpacityOps.Clear();
+                return;
+            }
+
+            if (forceLayer || HasOverlappingPureSoftOps())
+            {
+                MaterializePureSoftOpacityLayer();
+                if (_pureSoftOpacityLayerOpen)
+                    PopLayer();
+                _pureSoftOpacityLayerOpen = false;
+                _pureSoftOpacityDepth = 0;
+                _pureSoftOpacityOps.Clear();
+                return;
+            }
+
+            // Non-overlapping solids: bake group opacity into each brush (correct compositing).
+            for (var i = 0; i < _pureSoftOpacityOps.Count; i++)
+            {
+                var op = _pureSoftOpacityOps[i];
+                DrawImmediateSolidRounded(
+                    op.Rrect, op.IsRounded, op.RadiusX, op.RadiusY,
+                    op.Fill, op.Stroke, op.StrokeThickness, op.StrokeStyle,
+                    groupOpacity: _pureSoftOpacity);
+                _softPathHits++;
+                DrawingContextCallStats.OnSoftHit(_diagnosticTargetName);
+            }
+
+            _pureSoftOpacityOps.Clear();
+            _pureSoftOpacityDepth = 0;
+        }
+
+        private bool HasOverlappingPureSoftOps()
+        {
+            var n = _pureSoftOpacityOps.Count;
+            for (var i = 0; i < n; i++)
+            {
+                var a = _pureSoftOpacityOps[i].Rrect.Rect;
+                // Expand by half stroke so stroke-outset overlaps are detected.
+                var sa = _pureSoftOpacityOps[i].StrokeThickness * 0.5;
+                if (sa > 0)
+                    a = a.Inflate(sa);
+                for (var j = i + 1; j < n; j++)
+                {
+                    var b = _pureSoftOpacityOps[j].Rrect.Rect;
+                    var sb = _pureSoftOpacityOps[j].StrokeThickness * 0.5;
+                    if (sb > 0)
+                        b = b.Inflate(sb);
+                    if (a.Intersects(b))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        private readonly struct PureSoftOpacityOp
+        {
+            public PureSoftOpacityOp(
+                RoundedRect rrect,
+                bool isRounded,
+                float radiusX,
+                float radiusY,
+                ISolidColorBrush? fill,
+                ISolidColorBrush? stroke,
+                float strokeThickness,
+                ID2D1StrokeStyle? strokeStyle)
+            {
+                Rrect = rrect;
+                IsRounded = isRounded;
+                RadiusX = radiusX;
+                RadiusY = radiusY;
+                Fill = fill;
+                Stroke = stroke;
+                StrokeThickness = strokeThickness;
+                StrokeStyle = strokeStyle;
+            }
+
+            public RoundedRect Rrect { get; }
+            public bool IsRounded { get; }
+            public float RadiusX { get; }
+            public float RadiusY { get; }
+            public ISolidColorBrush? Fill { get; }
+            public ISolidColorBrush? Stroke { get; }
+            public float StrokeThickness { get; }
+            public ID2D1StrokeStyle? StrokeStyle { get; }
+        }
+
         private void FlushLineBatch()
         {
             if (!_lineBatchActive || _lineBatch.Count == 0)
@@ -365,38 +596,15 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 _deviceContext, _lineBatchColor, _lineBatchOpacity);
             if (brush.PlatformBrush is not null)
             {
-                // Multi-figure path only when enough segments amortize CreatePathGeometry.
-                if (_lineBatch.Count >= 8)
+                // Always DrawLine: CreatePathGeometry multi-figure setup is more expensive than
+                // a modest number of DrawLine calls (MixedScene grid lines; see opt-stroke-direct).
+                for (var i = 0; i < _lineBatch.Count; i++)
                 {
-                    using var path = Direct2D1Platform.Direct2D1Factory.CreatePathGeometry();
-                    using (var sink = path.Open())
-                    {
-                        for (var i = 0; i < _lineBatch.Count; i++)
-                        {
-                            var (a, b) = _lineBatch[i];
-                            sink.BeginFigure(a.ToVortice(), FigureBegin.Hollow);
-                            sink.AddLine(b.ToVortice());
-                            sink.EndFigure(FigureEnd.Open);
-                        }
-
-                        sink.Close();
-                    }
-
+                    var (a, b) = _lineBatch[i];
                     if (_lineBatchStyle is null)
-                        _deviceContext.DrawGeometry(path, brush.PlatformBrush, _lineBatchThickness);
+                        _deviceContext.DrawLine(a.ToVortice(), b.ToVortice(), brush.PlatformBrush, _lineBatchThickness);
                     else
-                        _deviceContext.DrawGeometry(path, brush.PlatformBrush, _lineBatchThickness, _lineBatchStyle);
-                }
-                else
-                {
-                    for (var i = 0; i < _lineBatch.Count; i++)
-                    {
-                        var (a, b) = _lineBatch[i];
-                        if (_lineBatchStyle is null)
-                            _deviceContext.DrawLine(a.ToVortice(), b.ToVortice(), brush.PlatformBrush, _lineBatchThickness);
-                        else
-                            _deviceContext.DrawLine(a.ToVortice(), b.ToVortice(), brush.PlatformBrush, _lineBatchThickness, _lineBatchStyle);
-                    }
+                        _deviceContext.DrawLine(a.ToVortice(), b.ToVortice(), brush.PlatformBrush, _lineBatchThickness, _lineBatchStyle);
                 }
             }
 
@@ -418,36 +626,14 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 _deviceContext, _ellipseStrokeColor, _ellipseStrokeOpacity);
             if (brush.PlatformBrush is not null)
             {
-                // GeometryGroup when enough ellipses amortize COM setup. MixedScene has 5.
-                if (_ellipseStrokeBatch.Count >= 5)
+                // Always DrawEllipse: GeometryGroup (CreateEllipseGeometry × N + group) is
+                // slower than N native DrawEllipse for typical UI counts (MixedScene has 5).
+                for (var i = 0; i < _ellipseStrokeBatch.Count; i++)
                 {
-                    var factory = Direct2D1Platform.Direct2D1Factory;
-                    var geos = new ID2D1Geometry[_ellipseStrokeBatch.Count];
-                    try
-                    {
-                        for (var i = 0; i < geos.Length; i++)
-                            geos[i] = factory.CreateEllipseGeometry(_ellipseStrokeBatch[i]);
-                        using var group = factory.CreateGeometryGroup(FillMode.Winding, geos);
-                        if (_ellipseStrokeStyle is null)
-                            _deviceContext.DrawGeometry(group, brush.PlatformBrush, _ellipseStrokeThickness);
-                        else
-                            _deviceContext.DrawGeometry(group, brush.PlatformBrush, _ellipseStrokeThickness, _ellipseStrokeStyle);
-                    }
-                    finally
-                    {
-                        for (var i = 0; i < geos.Length; i++)
-                            geos[i]?.Dispose();
-                    }
-                }
-                else
-                {
-                    for (var i = 0; i < _ellipseStrokeBatch.Count; i++)
-                    {
-                        if (_ellipseStrokeStyle is null)
-                            _deviceContext.DrawEllipse(_ellipseStrokeBatch[i], brush.PlatformBrush, _ellipseStrokeThickness);
-                        else
-                            _deviceContext.DrawEllipse(_ellipseStrokeBatch[i], brush.PlatformBrush, _ellipseStrokeThickness, _ellipseStrokeStyle);
-                    }
+                    if (_ellipseStrokeStyle is null)
+                        _deviceContext.DrawEllipse(_ellipseStrokeBatch[i], brush.PlatformBrush, _ellipseStrokeThickness);
+                    else
+                        _deviceContext.DrawEllipse(_ellipseStrokeBatch[i], brush.PlatformBrush, _ellipseStrokeThickness, _ellipseStrokeStyle);
                 }
             }
 
@@ -543,6 +729,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <inheritdoc/>
         public void Clear(Color color)
         {
+            EnsurePureSoftOpacityAllowsNonRect();
             FlushPrimitiveBatch();
             FlushDeferredClip();
             _deviceContext.Clear(color.ToDirect2D());
@@ -565,6 +752,11 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 ReleaseClipGeometry(_clipStack.Pop());
             }
             _softOpacityDepth = 0;
+            ClearSoftOpacityPending();
+            _pureSoftOpacityDepth = 0;
+            _pureSoftOpacity = 1f;
+            _pureSoftOpacityLayerOpen = false;
+            _pureSoftOpacityOps.Clear();
 
             // Balance any unmatched PushLayer before EndDraw. D2D owns the layer resources when
             // PushLayer is called with a null layer, so there is nothing for us to dispose.
@@ -739,6 +931,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="destRect">The rect in the output to draw to.</param>
         public void DrawBitmap(IBitmapImpl source, double opacity, Rect sourceRect, Rect destRect)
         {
+            EnsurePureSoftOpacityAllowsNonRect();
             FlushPrimitiveBatch();
             FlushDeferredClip();
             if (EffectiveBitmapBlendingMode == BitmapBlendingMode.Destination)
@@ -906,6 +1099,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="p2">The second point of the line.</param>
         public void DrawLine(IPen? pen, Point p1, Point p2)
         {
+            EnsurePureSoftOpacityAllowsNonRect();
             // Leaving pure solid-rect CL session; keep line batching for Mixed-style grids.
             if (_solidRectBatch.IsDeferredSimpleSession || _solidRectBatch.HasDeferredStrokes)
                 _solidRectBatch.MarkNonSimple(_deviceContext, _deviceResources);
@@ -981,6 +1175,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="geometry">The geometry.</param>
         public void DrawGeometry(IBrush? brush, IPen? pen, IGeometryImpl geometry)
         {
+            EnsurePureSoftOpacityAllowsNonRect();
             FlushPrimitiveBatch();
             FlushDeferredClip();
             if (brush != null)
@@ -1015,6 +1210,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
             _drawRectangles++;
             DrawingContextCallStats.OnDrawRectangle(_diagnosticTargetName);
             if (TryDrawRectangleWithSoftClip(brush, pen, rrect, boxShadow))
+                return;
+
+            if (TryDrawRectangleWithPureSoftOpacity(brush, pen, rrect, boxShadow))
                 return;
 
             // Hot path for UI chrome: solid fill and/or solid stroke, uniform rounded (or axis-
@@ -1163,10 +1361,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (solidFill is null && solidStroke is null)
                 return false;
 
-            // Translucent solids (opacity or Color.A): keep immediate ordered path (no batch / no CL).
-            if (!SolidRectBatch.IsFullyOpaque(solidFill) || !SolidRectBatch.IsFullyOpaque(solidStroke))
-                return false;
-
             // Prior deferred line / ellipse strokes must be drawn before this rect fill to
             // preserve Z-order (line then overlapping rect → rect on top).
             if (_lineBatchActive || _ellipseStrokeBatchActive)
@@ -1174,8 +1368,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 FlushLineBatch();
                 FlushEllipseStrokeBatch();
             }
-
-            FlushDeferredClip();
 
             var rect = rrect.Rect;
             var radiusX = Math.Max(rrect.RadiiTopLeft.X,
@@ -1194,6 +1386,27 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 }
             }
 
+            // Translucent solids: immediate native path (no batch / no CL). Still cheaper than
+            // the full CreateBrush type-switch used by MixedScene translucent panels.
+            if (!SolidRectBatch.IsFullyOpaque(solidFill) || !SolidRectBatch.IsFullyOpaque(solidStroke))
+            {
+                FlushPrimitiveBatch();
+                FlushDeferredClip();
+                DrawImmediateSolidRounded(
+                    rrect,
+                    isRounded,
+                    isRounded ? (float)rrect.RadiiTopLeft.X : 0,
+                    isRounded ? (float)rrect.RadiiTopLeft.Y : 0,
+                    solidFill,
+                    solidStroke,
+                    strokeThickness,
+                    strokeStyle,
+                    groupOpacity: 1f);
+                return true;
+            }
+
+            FlushDeferredClip();
+
             // Axis-aligned clip (PushClip rect) is compatible with simple solid batching;
             // only geometric deferred clips force a full flush (handled in FlushDeferredClip).
             return _solidRectBatch.HandleSimpleRect(
@@ -1207,6 +1420,79 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 solidStroke,
                 strokeThickness,
                 strokeStyle);
+        }
+
+        /// <summary>
+        /// Draws a uniform solid fill/stroke rect with a cached solid brush (no CreateBrush).
+        /// </summary>
+        private void DrawImmediateSolidRounded(
+            RoundedRect rrect,
+            bool isRounded,
+            float radiusX,
+            float radiusY,
+            ISolidColorBrush? solidFill,
+            ISolidColorBrush? solidStroke,
+            float strokeThickness,
+            ID2D1StrokeStyle? strokeStyle,
+            float groupOpacity)
+        {
+            if (solidFill is not null)
+            {
+                var op = solidFill.Opacity * groupOpacity;
+                if (op > 0)
+                {
+                    var fill = _deviceResources.GetOrCreateSolidBrush(_deviceContext, solidFill.Color, op);
+                    if (fill.PlatformBrush is not null)
+                    {
+                        if (isRounded)
+                        {
+                            _deviceContext.FillRoundedRectangle(new RoundedRectangle
+                            {
+                                Rect = rrect.Rect.ToDirect2D(),
+                                RadiusX = radiusX,
+                                RadiusY = radiusY
+                            }, fill.PlatformBrush);
+                        }
+                        else
+                        {
+                            _deviceContext.FillRectangle(rrect.Rect.ToDirect2D(), fill.PlatformBrush);
+                        }
+                    }
+                }
+            }
+
+            if (solidStroke is not null && strokeThickness > 0)
+            {
+                var op = solidStroke.Opacity * groupOpacity;
+                if (op > 0)
+                {
+                    var stroke = _deviceResources.GetOrCreateSolidBrush(_deviceContext, solidStroke.Color, op);
+                    if (stroke.PlatformBrush is not null)
+                    {
+                        if (isRounded)
+                        {
+                            var rr = new RoundedRectangle
+                            {
+                                Rect = rrect.Rect.ToDirect2D(),
+                                RadiusX = radiusX,
+                                RadiusY = radiusY
+                            };
+                            if (strokeStyle is null)
+                                _deviceContext.DrawRoundedRectangle(rr, stroke.PlatformBrush, strokeThickness);
+                            else
+                                _deviceContext.DrawRoundedRectangle(rr, stroke.PlatformBrush, strokeThickness, strokeStyle);
+                        }
+                        else
+                        {
+                            var rc = rrect.Rect.ToDirect2D();
+                            if (strokeStyle is null)
+                                _deviceContext.DrawRectangle(rc, stroke.PlatformBrush, strokeThickness);
+                            else
+                                _deviceContext.DrawRectangle(rc, stroke.PlatformBrush, strokeThickness, strokeStyle);
+                        }
+                    }
+                }
+            }
         }
 
         /// <summary>
@@ -1267,6 +1553,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <inheritdoc />
         public void DrawEllipse(IBrush? brush, IPen? pen, Rect rect)
         {
+            EnsurePureSoftOpacityAllowsNonRect();
             // End solid-rect CL session; ellipse strokes can still multi-batch.
             if (_solidRectBatch.IsDeferredSimpleSession || _solidRectBatch.HasDeferredStrokes)
                 _solidRectBatch.MarkNonSimple(_deviceContext, _deviceResources);
@@ -1286,7 +1573,9 @@ namespace MIR.Direct2D1ForAvalonia.Media
             if (brush != null)
                 FlushEllipseStrokeBatch();
 
-            if (brush is ISolidColorBrush solidFill && SolidRectBatch.IsFullyOpaque(solidFill))
+            // Any solid color (opaque or translucent) uses the device solid-brush cache.
+            // Opaque strokes may multi-batch; translucent strokes draw immediately (order-safe).
+            if (brush is ISolidColorBrush solidFill)
             {
                 var fill = _deviceResources.GetOrCreateSolidBrush(
                     _deviceContext, solidFill.Color, solidFill.Opacity);
@@ -1300,29 +1589,45 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     _deviceContext.FillEllipse(ellipse, b.PlatformBrush);
             }
 
-            if (pen?.Brush is ISolidColorBrush solidStroke && pen.Thickness > 0 && SolidRectBatch.IsFullyOpaque(solidStroke))
+            if (pen?.Brush is ISolidColorBrush solidStroke && pen.Thickness > 0)
             {
                 var thickness = (float)pen.Thickness;
                 var style = GetOrCreateStrokeStyle(pen);
-                if (_ellipseStrokeBatchActive
-                    && (!ColorEquals(_ellipseStrokeColor, solidStroke.Color)
-                        || Math.Abs(_ellipseStrokeOpacity - solidStroke.Opacity) > 0.0001
-                        || Math.Abs(_ellipseStrokeThickness - thickness) > 0.0001
-                        || !ReferenceEquals(_ellipseStrokeStyle, style)))
+                if (SolidRectBatch.IsFullyOpaque(solidStroke))
+                {
+                    if (_ellipseStrokeBatchActive
+                        && (!ColorEquals(_ellipseStrokeColor, solidStroke.Color)
+                            || Math.Abs(_ellipseStrokeOpacity - solidStroke.Opacity) > 0.0001
+                            || Math.Abs(_ellipseStrokeThickness - thickness) > 0.0001
+                            || !ReferenceEquals(_ellipseStrokeStyle, style)))
+                    {
+                        FlushEllipseStrokeBatch();
+                    }
+
+                    if (!_ellipseStrokeBatchActive)
+                    {
+                        _ellipseStrokeColor = solidStroke.Color;
+                        _ellipseStrokeOpacity = solidStroke.Opacity;
+                        _ellipseStrokeThickness = thickness;
+                        _ellipseStrokeStyle = style;
+                        _ellipseStrokeBatchActive = true;
+                    }
+
+                    _ellipseStrokeBatch.Add(ellipse);
+                }
+                else
                 {
                     FlushEllipseStrokeBatch();
+                    var stroke = _deviceResources.GetOrCreateSolidBrush(
+                        _deviceContext, solidStroke.Color, solidStroke.Opacity);
+                    if (stroke.PlatformBrush is not null)
+                    {
+                        if (style is null)
+                            _deviceContext.DrawEllipse(ellipse, stroke.PlatformBrush, thickness);
+                        else
+                            _deviceContext.DrawEllipse(ellipse, stroke.PlatformBrush, thickness, style);
+                    }
                 }
-
-                if (!_ellipseStrokeBatchActive)
-                {
-                    _ellipseStrokeColor = solidStroke.Color;
-                    _ellipseStrokeOpacity = solidStroke.Opacity;
-                    _ellipseStrokeThickness = thickness;
-                    _ellipseStrokeStyle = style;
-                    _ellipseStrokeBatchActive = true;
-                }
-
-                _ellipseStrokeBatch.Add(ellipse);
             }
             else if (pen?.Brush != null)
             {
@@ -1346,6 +1651,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         /// <param name="glyphRun">The glyph run.</param>
         public void DrawGlyphRun(IBrush? foreground, IGlyphRunImpl glyphRun)
         {
+            EnsurePureSoftOpacityAllowsNonRect();
             FlushPrimitiveBatch();
             FlushDeferredClip();
             using (var brush = CreateBrush(foreground, glyphRun.Bounds))
@@ -1412,6 +1718,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         {
             _pushClips++;
             DrawingContextCallStats.OnPushClip();
+            EnsurePureSoftOpacityAllowsNonRect();
             FlushPrimitiveBatch();
             FlushDeferredClip();
             _clipStack.Push(ClipEntry.AxisAligned());
@@ -1422,6 +1729,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
         {
             _pushClips++;
             DrawingContextCallStats.OnPushClip();
+            EnsurePureSoftOpacityAllowsNonRect();
             // Fence deferred primitives on both push sides (including the zero-radius AA path).
             FlushPrimitiveBatch();
             FlushDeferredClip();
@@ -1882,11 +2190,37 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
         public void PopClip()
         {
-            // Primitives issued inside this clip scope must be drawn while the clip is still
-            // active. Materialise any deferred clip first (so it is a real D2D layer/clip when
-            // the primitives draw), then flush the deferred primitive batches, then pop.
-            FlushDeferredClip();
+            // Emit a deferred SoftMerged solid while the entry is still on the stack (in case
+            // PopOpacity was skipped). Do not FlushDeferredClip for empty Deferred/SoftMerged:
+            // that would PushLayer with zero content. ClipLayerHeavy soft-bakes on PopOpacity then
+            // would have paid for 12 empty geometric layers per frame on the subsequent PopClip.
+            if (_softOpacityPending
+                && _clipStack.Count > 0
+                && _clipStack.Peek().State == ClipState.SoftMerged)
+            {
+                EmitSoftOpacityPending(bakeOpacity: true);
+            }
+
+            // Primitives deferred under a real clip/layer must flush before pop.
             FlushPrimitiveBatch();
+
+            // Only materialise Deferred/SoftMerged when something still needs a geometric mask
+            // (e.g. SoftMerged multi-draw already forced a pending emit path via FlushDeferredClip
+            // on the second draw). Empty soft clips just discard.
+            if (_clipStack.Count > 0)
+            {
+                var top = _clipStack.Peek().State;
+                if (top is ClipState.LayerOwned or ClipState.MergedIntoOpacity or ClipState.AxisAligned)
+                {
+                    // Real clip/layer — nothing deferred to materialise at pop.
+                }
+                else if (top == ClipState.SoftMerged && _softOpacityDepth > 0)
+                {
+                    // Unclosed soft opacity with no pending draw: drop soft depth so stack balances.
+                    _softOpacityDepth--;
+                }
+            }
+
             var entry = _clipStack.Pop();
             switch (entry.State)
             {
@@ -1900,7 +2234,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     break;
 
                 case ClipState.Deferred:
-                    // Never flushed to a layer (e.g. empty push/pop, or only nested no-ops).
+                    // Never flushed to a layer (soft path only, or empty push/pop).
                     ReleaseClipGeometry(entry);
                     break;
 
@@ -1910,7 +2244,7 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     break;
 
                 case ClipState.SoftMerged:
-                    // Soft clip never pushed a D2D layer; PopOpacity already cleared soft depth.
+                    // Soft clip never pushed a D2D layer.
                     ReleaseClipGeometry(entry);
                     break;
 
@@ -1980,9 +2314,20 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
             FlushPrimitiveBatch();
             FlushDeferredClip();
+            FlushPureSoftOpacity(forceLayer: false);
 
             if (opacity < 1)
             {
+                // Soft pure-opacity: defer solid rects; soft-bake when non-overlapping on pop.
+                // Nested pure soft falls back to a real layer (rare in Avalonia UI).
+                if (_pureSoftOpacityDepth == 0)
+                {
+                    _pureSoftOpacity = (float)opacity;
+                    _pureSoftOpacityDepth = 1;
+                    _pureSoftOpacityOps.Clear();
+                    return;
+                }
+
                 if (bounds == null || bounds == default(Rect))
                 {
                     bounds = new Rect(0, 0, _renderTarget.PixelSize.Width, _renderTarget.PixelSize.Height);
@@ -2017,6 +2362,14 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 // Primitives issued inside the soft opacity scope must be drawn before it closes.
                 FlushPrimitiveBatch();
 
+                // Single deferred solid under SoftMerged: bake clip+opacity without a D2D layer.
+                if (_softOpacityPending
+                    && _clipStack.Count > 0
+                    && _clipStack.Peek().State == ClipState.SoftMerged)
+                {
+                    EmitSoftOpacityPending(bakeOpacity: true);
+                }
+
                 if (_clipStack.Count > 0 && _clipStack.Peek().State == ClipState.SoftMerged)
                 {
                     var soft = _clipStack.Pop();
@@ -2024,6 +2377,16 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 }
 
                 _softOpacityDepth--;
+                return;
+            }
+
+            if (_pureSoftOpacityDepth > 0)
+            {
+                // Do not FlushPrimitiveBatch here — it would MarkNonSimple only; pure soft
+                // solids are held in _pureSoftOpacityOps and closed by FlushPureSoftOpacity.
+                FlushLineBatch();
+                FlushEllipseStrokeBatch();
+                FlushPureSoftOpacity(forceLayer: false);
                 return;
             }
 
@@ -2128,10 +2491,90 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 throw;
             }
 
+            // Replay any deferred soft-opacity solid inside the real layer (layer owns opacity).
+            if (top.State == ClipState.SoftMerged && _softOpacityPending)
+                EmitSoftOpacityPending(bakeOpacity: false);
+
             if (top.State == ClipState.SoftMerged)
                 _clipStack.Push(ClipEntry.MergedIntoOpacity(geometry, ownsGeometry));
             else
                 _clipStack.Push(ClipEntry.LayerOwned(geometry, ownsGeometry));
+        }
+
+        private void ClearSoftOpacityPending()
+        {
+            _softOpacityPending = false;
+            _softOpacityPendingFill = null;
+            _softOpacityPendingStroke = null;
+            _softOpacityPendingStrokeStyle = null;
+            _softOpacityPendingStrokeThickness = 0;
+            _softOpacityPendingPaintClipShape = false;
+            _softOpacityPendingRrect = default;
+        }
+
+        /// <summary>
+        /// Emits the deferred SoftMerged solid rect. When <paramref name="bakeOpacity"/> is true,
+        /// multiplies the SoftMerged opacity into the brush (no D2D layer). When false, draws at
+        /// full brush opacity because a real layer already carries the group opacity.
+        /// </summary>
+        private void EmitSoftOpacityPending(bool bakeOpacity)
+        {
+            if (!_softOpacityPending)
+                return;
+
+            var rrect = _softOpacityPendingRrect;
+            var fill = _softOpacityPendingFill;
+            var stroke = _softOpacityPendingStroke;
+            var thickness = _softOpacityPendingStrokeThickness;
+            var style = _softOpacityPendingStrokeStyle;
+            var paintClip = _softOpacityPendingPaintClipShape;
+            ClearSoftOpacityPending();
+
+            float groupOpacity = 1f;
+            if (bakeOpacity
+                && _clipStack.Count > 0
+                && _clipStack.Peek().State == ClipState.SoftMerged)
+            {
+                groupOpacity = _clipStack.Peek().Opacity;
+            }
+
+            // When paintClip is set, rrect.Rect equals the clip bounds but radii may differ
+            // (sharp fill under rounded clip). Prefer clip shape for correct corner AA; fall
+            // back to rrect if the SoftMerged entry is already gone (layer materialise path).
+            RoundedRect paintShape = rrect;
+            if (paintClip
+                && _clipStack.Count > 0
+                && _clipStack.Peek().State is ClipState.SoftMerged or ClipState.Deferred)
+            {
+                paintShape = _clipStack.Peek().ClipShape;
+            }
+
+            _softPathHits++;
+            DrawingContextCallStats.OnSoftHit(_diagnosticTargetName);
+
+            if (fill is not null)
+            {
+                var effectiveOpacity = fill.Opacity * groupOpacity;
+                if (effectiveOpacity > 0)
+                {
+                    var fillBrush = _deviceResources.GetOrCreateSolidBrush(
+                        _deviceContext, fill.Color, effectiveOpacity);
+                    if (fillBrush.PlatformBrush is not null)
+                        FillSoftRounded(paintShape, fillBrush.PlatformBrush, stashOnSoftClip: paintClip);
+                }
+            }
+
+            if (stroke is not null && thickness > 0)
+            {
+                var effectiveOpacity = stroke.Opacity * groupOpacity;
+                if (effectiveOpacity > 0)
+                {
+                    var strokeBrush = _deviceResources.GetOrCreateSolidBrush(
+                        _deviceContext, stroke.Color, effectiveOpacity);
+                    if (strokeBrush.PlatformBrush is not null)
+                        StrokeSoftRounded(paintShape, strokeBrush.PlatformBrush, thickness, style);
+                }
+            }
         }
 
         /// <summary>
@@ -2156,16 +2599,6 @@ namespace MIR.Direct2D1ForAvalonia.Media
 
             if (!hasSoftClip)
                 return false;
-
-            // Soft-merged opacity bakes opacity per-primitive, which breaks group transparency
-            // (two overlapping opaque rects at 0.5 → 0.75, not 0.5). Fall back to a real D2D
-            // opacity layer so the group is composited correctly.
-            if (_clipStack.Peek().State == ClipState.SoftMerged && _clipStack.Peek().Opacity < 1f)
-            {
-                _softPathMisses++;
-                DrawingContextCallStats.OnSoftMiss();
-                return false;
-            }
 
             // Soft path: solid fills and/or simple solid pens only.
             ISolidColorBrush? solidFill = null;
@@ -2198,10 +2631,12 @@ namespace MIR.Direct2D1ForAvalonia.Media
             RoundedRect clipShape = default;
             RawRectF contentBounds = default;
             var paintClipShape = false;
+            var isSoftMergedOpacity = false;
 
             if (hasSoftClip)
             {
                 var top = _clipStack.Peek();
+                isSoftMergedOpacity = top.State == ClipState.SoftMerged && top.Opacity < 1f;
                 clipOpacity = top.State == ClipState.SoftMerged ? top.Opacity : 1f;
                 clipShape = top.ClipShape;
                 contentBounds = top.ContentBounds;
@@ -2219,14 +2654,13 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     return false;
                 }
 
-                // fill == clip (including radii) → paint clip shape for corner-AA parity with a
-                // geometric mask. If the radii differ, painting the clip shape would fill corners
-                // that belong to the clip but not the fill, so fall through to the interior check.
+                // fill covers the full clip bounds (any corner radii on the fill) → paint the clip
+                // shape for corner-AA parity with a geometric mask. ClipLayerHeavy and typical
+                // "PushClip(rounded); DrawRectangle(bounds)" UI use a sharp fill under a rounded
+                // clip; the visible result is the clip shape, not the sharp rect.
                 // fill fully interior to rounded clip → paint fill shape (multi-draw under one clip).
                 // otherwise fall through to real layer (partial intersection not approximated).
-                if (solidFill is not null && pen is null
-                    && RectEquals(shape, clipShape.Rect)
-                    && RadiiMatch(rrect, clipShape))
+                if (solidFill is not null && pen is null && RectEquals(shape, clipShape.Rect))
                     paintClipShape = true;
                 else if (!IsFullyInteriorToRoundedClip(shape, halfStroke, clipShape))
                 {
@@ -2234,6 +2668,31 @@ namespace MIR.Direct2D1ForAvalonia.Media
                     DrawingContextCallStats.OnSoftMiss();
                     return false;
                 }
+            }
+
+            // SoftMerged opacity: defer a single solid so PopOpacity can soft-bake (correct for
+            // one primitive). A second draw materialises a real layer (group transparency).
+            if (isSoftMergedOpacity)
+            {
+                if (_softOpacityPending)
+                {
+                    // Multi-draw opacity group — real layer required.
+                    _softPathMisses++;
+                    DrawingContextCallStats.OnSoftMiss();
+                    FlushDeferredClip();
+                    return false;
+                }
+
+                FlushPrimitiveBatch();
+                _softOpacityPending = true;
+                _softOpacityPendingRrect = rrect;
+                _softOpacityPendingFill = solidFill;
+                _softOpacityPendingStroke = solidStroke;
+                _softOpacityPendingStrokeThickness = pen is not null ? (float)pen.Thickness : 0;
+                _softOpacityPendingStrokeStyle = pen is not null ? GetOrCreateStrokeStyle(pen) : null;
+                _softOpacityPendingPaintClipShape = paintClipShape;
+                // Count as hit once emitted; pending reserves the soft path.
+                return true;
             }
 
             var bakedOpacity = clipOpacity;

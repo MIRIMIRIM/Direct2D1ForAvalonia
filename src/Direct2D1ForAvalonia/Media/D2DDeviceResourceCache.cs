@@ -40,6 +40,8 @@ internal sealed class D2DDeviceResourceCache
     private const int MaxCommandLists = 48;
     private const int MaxSolidBrushes = 512;
     private const int MaxStrokeStyles = 128;
+    private const int MaxLinearGradientBrushes = 128;
+    private const int MaxRadialGradientBrushes = 128;
 
     // Per-cache gate: protects dictionaries, LRU, stats, and native disposal.
     private readonly object _gate = new();
@@ -64,8 +66,18 @@ internal sealed class D2DDeviceResourceCache
     private readonly Dictionary<CommandListKey, CommandListEntry> _commandLists = new();
     private readonly LinkedList<CommandListKey> _commandListLru = new();
     private readonly Dictionary<CommandListKey, LinkedListNode<CommandListKey>> _commandListLruNodes = new();
+    private readonly Dictionary<LinearGradientBrushKey, ID2D1LinearGradientBrush> _linearGradients = new();
+    private readonly LinkedList<LinearGradientBrushKey> _linearGradientLru = new();
+    private readonly Dictionary<LinearGradientBrushKey, LinkedListNode<LinearGradientBrushKey>> _linearGradientLruNodes = new();
+    private readonly Dictionary<RadialGradientBrushKey, ID2D1RadialGradientBrush> _radialGradients = new();
+    private readonly LinkedList<RadialGradientBrushKey> _radialGradientLru = new();
+    private readonly Dictionary<RadialGradientBrushKey, LinkedListNode<RadialGradientBrushKey>> _radialGradientLruNodes = new();
     private int _commandListHits;
     private int _commandListStores;
+    private int _linearGradientHits;
+    private int _linearGradientCreates;
+    private int _radialGradientHits;
+    private int _radialGradientCreates;
 
     /// <summary>Device-scoped command-list lookup hits (steady intermediate repaints).</summary>
     public int CommandListHits
@@ -251,7 +263,195 @@ internal sealed class D2DDeviceResourceCache
             foreach (var stops in _gradientStops.Values)
                 stops.Dispose();
             _gradientStops.Clear();
+
+            foreach (var brush in _linearGradients.Values)
+                brush.Dispose();
+            _linearGradients.Clear();
+            _linearGradientLru.Clear();
+            _linearGradientLruNodes.Clear();
+
+            foreach (var brush in _radialGradients.Values)
+                brush.Dispose();
+            _radialGradients.Clear();
+            _radialGradientLru.Clear();
+            _radialGradientLruNodes.Clear();
         }
+    }
+
+    /// <summary>
+    /// Device-scoped linear gradient brush cache hits (template UI / GradientFill steady state).
+    /// </summary>
+    public int LinearGradientHits
+    {
+        get { lock (_gate) return _linearGradientHits; }
+    }
+
+    /// <summary>
+    /// Device-scoped linear gradient brush creations.
+    /// </summary>
+    public int LinearGradientCreates
+    {
+        get { lock (_gate) return _linearGradientCreates; }
+    }
+
+    /// <summary>Device-scoped radial gradient brush cache hits.</summary>
+    public int RadialGradientHits
+    {
+        get { lock (_gate) return _radialGradientHits; }
+    }
+
+    /// <summary>Device-scoped radial gradient brush creations.</summary>
+    public int RadialGradientCreates
+    {
+        get { lock (_gate) return _radialGradientCreates; }
+    }
+
+    /// <summary>
+    /// Returns a cached <see cref="ID2D1LinearGradientBrush"/> for the given brush+destination.
+    /// Owned by the cache — do not dispose.
+    /// </summary>
+    public ID2D1LinearGradientBrush GetOrCreateLinearGradientBrush(
+        ID2D1RenderTarget target,
+        ILinearGradientBrush brush,
+        Rect destinationRect)
+    {
+        var startPoint = brush.StartPoint.ToPixels(destinationRect);
+        var endPoint = brush.EndPoint.ToPixels(destinationRect);
+        var transform = BrushTransform.Apply(brush, destinationRect, Matrix.Identity);
+        var key = new LinearGradientBrushKey(
+            brush.GradientStops,
+            brush.SpreadMethod,
+            startPoint,
+            endPoint,
+            brush.Opacity,
+            transform);
+
+        lock (_gate)
+        {
+            if (_linearGradients.TryGetValue(key, out var cached))
+            {
+                if (_linearGradients.Count > MaxLinearGradientBrushes * 3 / 4)
+                    TouchLinearGradient(key);
+                _linearGradientHits++;
+                return cached;
+            }
+
+            while (_linearGradients.Count >= MaxLinearGradientBrushes && _linearGradientLru.Count > 0)
+            {
+                var oldestKey = _linearGradientLru.First!.Value;
+                if (_linearGradients.Remove(oldestKey, out var oldBrush))
+                    oldBrush.Dispose();
+                if (_linearGradientLruNodes.TryGetValue(oldestKey, out var node))
+                {
+                    _linearGradientLru.Remove(node);
+                    _linearGradientLruNodes.Remove(oldestKey);
+                }
+            }
+
+            var stops = GetOrCreateGradientStopsUnlocked(target, brush.GradientStops, brush.SpreadMethod);
+            var created = target.CreateLinearGradientBrush(
+                new LinearGradientBrushProperties
+                {
+                    StartPoint = startPoint.ToVortice(),
+                    EndPoint = endPoint.ToVortice()
+                },
+                new BrushProperties
+                {
+                    Opacity = (float)brush.Opacity,
+                    Transform = transform.ToDirect2D(),
+                },
+                stops);
+
+            _linearGradients[key] = created;
+            _linearGradientLruNodes[key] = _linearGradientLru.AddLast(key);
+            _linearGradientCreates++;
+            return created;
+        }
+    }
+
+    private void TouchLinearGradient(LinearGradientBrushKey key)
+    {
+        if (!_linearGradientLruNodes.TryGetValue(key, out var node))
+            return;
+        _linearGradientLru.Remove(node);
+        _linearGradientLruNodes[key] = _linearGradientLru.AddLast(key);
+    }
+
+    /// <summary>
+    /// Returns a cached <see cref="ID2D1RadialGradientBrush"/> for the given brush+destination.
+    /// Owned by the cache — do not dispose.
+    /// </summary>
+    public ID2D1RadialGradientBrush GetOrCreateRadialGradientBrush(
+        ID2D1RenderTarget target,
+        IRadialGradientBrush brush,
+        Rect destinationRect)
+    {
+        var centerPoint = brush.Center.ToPixels(destinationRect);
+        var gradientOrigin = brush.GradientOrigin.ToPixels(destinationRect) - centerPoint;
+        var radiusX = brush.RadiusX.ToValue(destinationRect.Width);
+        var radiusY = brush.RadiusY.ToValue(destinationRect.Height);
+        var transform = BrushTransform.Apply(brush, destinationRect, Matrix.Identity);
+        var key = new RadialGradientBrushKey(
+            brush.GradientStops,
+            brush.SpreadMethod,
+            centerPoint,
+            gradientOrigin,
+            radiusX,
+            radiusY,
+            brush.Opacity,
+            transform);
+
+        lock (_gate)
+        {
+            if (_radialGradients.TryGetValue(key, out var cached))
+            {
+                if (_radialGradients.Count > MaxRadialGradientBrushes * 3 / 4)
+                    TouchRadialGradient(key);
+                _radialGradientHits++;
+                return cached;
+            }
+
+            while (_radialGradients.Count >= MaxRadialGradientBrushes && _radialGradientLru.Count > 0)
+            {
+                var oldestKey = _radialGradientLru.First!.Value;
+                if (_radialGradients.Remove(oldestKey, out var oldBrush))
+                    oldBrush.Dispose();
+                if (_radialGradientLruNodes.TryGetValue(oldestKey, out var node))
+                {
+                    _radialGradientLru.Remove(node);
+                    _radialGradientLruNodes.Remove(oldestKey);
+                }
+            }
+
+            var stops = GetOrCreateGradientStopsUnlocked(target, brush.GradientStops, brush.SpreadMethod);
+            var created = target.CreateRadialGradientBrush(
+                new RadialGradientBrushProperties
+                {
+                    Center = centerPoint.ToVortice(),
+                    GradientOriginOffset = gradientOrigin.ToVortice(),
+                    RadiusX = (float)radiusX,
+                    RadiusY = (float)radiusY
+                },
+                new BrushProperties
+                {
+                    Opacity = (float)brush.Opacity,
+                    Transform = transform.ToDirect2D(),
+                },
+                stops);
+
+            _radialGradients[key] = created;
+            _radialGradientLruNodes[key] = _radialGradientLru.AddLast(key);
+            _radialGradientCreates++;
+            return created;
+        }
+    }
+
+    private void TouchRadialGradient(RadialGradientBrushKey key)
+    {
+        if (!_radialGradientLruNodes.TryGetValue(key, out var node))
+            return;
+        _radialGradientLru.Remove(node);
+        _radialGradientLruNodes[key] = _radialGradientLru.AddLast(key);
     }
 
     /// <summary>
@@ -264,26 +464,32 @@ internal sealed class D2DDeviceResourceCache
         IReadOnlyList<IGradientStop> stops,
         GradientSpreadMethod spreadMethod)
     {
-        var key = new GradientStopKey(stops, spreadMethod);
         lock (_gate)
+            return GetOrCreateGradientStopsUnlocked(target, stops, spreadMethod);
+    }
+
+    private ID2D1GradientStopCollection GetOrCreateGradientStopsUnlocked(
+        ID2D1RenderTarget target,
+        IReadOnlyList<IGradientStop> stops,
+        GradientSpreadMethod spreadMethod)
+    {
+        var key = new GradientStopKey(stops, spreadMethod);
+        if (_gradientStops.TryGetValue(key, out var cached))
+            return cached;
+
+        var d2dStops = new Vortice.Direct2D1.GradientStop[stops.Count];
+        for (var i = 0; i < stops.Count; i++)
         {
-            if (_gradientStops.TryGetValue(key, out var cached))
-                return cached;
-
-            var d2dStops = new Vortice.Direct2D1.GradientStop[stops.Count];
-            for (var i = 0; i < stops.Count; i++)
+            d2dStops[i] = new Vortice.Direct2D1.GradientStop
             {
-                d2dStops[i] = new Vortice.Direct2D1.GradientStop
-                {
-                    Color = stops[i].Color.ToDirect2D(),
-                    Position = (float)stops[i].Offset
-                };
-            }
-
-            var collection = target.CreateGradientStopCollection(d2dStops, spreadMethod.ToDirect2D());
-            _gradientStops[key] = collection;
-            return collection;
+                Color = stops[i].Color.ToDirect2D(),
+                Position = (float)stops[i].Offset
+            };
         }
+
+        var collection = target.CreateGradientStopCollection(d2dStops, spreadMethod.ToDirect2D());
+        _gradientStops[key] = collection;
+        return collection;
     }
 
     /// <summary>
@@ -521,6 +727,113 @@ internal readonly struct CommandListEntry
     }
 
     public ID2D1CommandList CommandList { get; }
+}
+
+/// <summary>
+/// Key for a fully materialised radial gradient brush (stops + ellipse geometry in dest pixels).
+/// </summary>
+internal readonly struct RadialGradientBrushKey : IEquatable<RadialGradientBrushKey>
+{
+    private readonly GradientStopKey _stops;
+    private readonly float _cx, _cy, _ox, _oy, _rx, _ry;
+    private readonly float _opacity;
+    private readonly float _m11, _m12, _m21, _m22, _m31, _m32;
+    private readonly int _hash;
+
+    public RadialGradientBrushKey(
+        IReadOnlyList<IGradientStop> stops,
+        GradientSpreadMethod spreadMethod,
+        Point center,
+        Vector originOffset,
+        double radiusX,
+        double radiusY,
+        double opacity,
+        Matrix transform)
+    {
+        _stops = new GradientStopKey(stops, spreadMethod);
+        _cx = (float)center.X;
+        _cy = (float)center.Y;
+        _ox = (float)originOffset.X;
+        _oy = (float)originOffset.Y;
+        _rx = (float)radiusX;
+        _ry = (float)radiusY;
+        _opacity = (float)opacity;
+        _m11 = (float)transform.M11;
+        _m12 = (float)transform.M12;
+        _m21 = (float)transform.M21;
+        _m22 = (float)transform.M22;
+        _m31 = (float)transform.M31;
+        _m32 = (float)transform.M32;
+        _hash = HashCode.Combine(
+            _stops,
+            HashCode.Combine(_cx, _cy, _ox, _oy, _rx, _ry),
+            HashCode.Combine(_opacity, _m11, _m12, _m21, _m22, _m31, _m32));
+    }
+
+    public bool Equals(RadialGradientBrushKey other)
+        => _stops.Equals(other._stops)
+           && _cx == other._cx && _cy == other._cy
+           && _ox == other._ox && _oy == other._oy
+           && _rx == other._rx && _ry == other._ry
+           && _opacity == other._opacity
+           && _m11 == other._m11 && _m12 == other._m12
+           && _m21 == other._m21 && _m22 == other._m22
+           && _m31 == other._m31 && _m32 == other._m32;
+
+    public override bool Equals(object? obj) => obj is RadialGradientBrushKey other && Equals(other);
+
+    public override int GetHashCode() => _hash;
+}
+
+/// <summary>
+/// Key for a fully materialised linear gradient brush (stops + geometry in destination pixels).
+/// </summary>
+internal readonly struct LinearGradientBrushKey : IEquatable<LinearGradientBrushKey>
+{
+    private readonly GradientStopKey _stops;
+    private readonly float _x0, _y0, _x1, _y1;
+    private readonly float _opacity;
+    private readonly float _m11, _m12, _m21, _m22, _m31, _m32;
+    private readonly int _hash;
+
+    public LinearGradientBrushKey(
+        IReadOnlyList<IGradientStop> stops,
+        GradientSpreadMethod spreadMethod,
+        Point start,
+        Point end,
+        double opacity,
+        Matrix transform)
+    {
+        _stops = new GradientStopKey(stops, spreadMethod);
+        _x0 = (float)start.X;
+        _y0 = (float)start.Y;
+        _x1 = (float)end.X;
+        _y1 = (float)end.Y;
+        _opacity = (float)opacity;
+        _m11 = (float)transform.M11;
+        _m12 = (float)transform.M12;
+        _m21 = (float)transform.M21;
+        _m22 = (float)transform.M22;
+        _m31 = (float)transform.M31;
+        _m32 = (float)transform.M32;
+        _hash = HashCode.Combine(
+            _stops,
+            HashCode.Combine(_x0, _y0, _x1, _y1, _opacity),
+            HashCode.Combine(_m11, _m12, _m21, _m22, _m31, _m32));
+    }
+
+    public bool Equals(LinearGradientBrushKey other)
+        => _stops.Equals(other._stops)
+           && _x0 == other._x0 && _y0 == other._y0
+           && _x1 == other._x1 && _y1 == other._y1
+           && _opacity == other._opacity
+           && _m11 == other._m11 && _m12 == other._m12
+           && _m21 == other._m21 && _m22 == other._m22
+           && _m31 == other._m31 && _m32 == other._m32;
+
+    public override bool Equals(object? obj) => obj is LinearGradientBrushKey other && Equals(other);
+
+    public override int GetHashCode() => _hash;
 }
 
 /// <summary>

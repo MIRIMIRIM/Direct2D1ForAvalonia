@@ -16,26 +16,10 @@ namespace MIR.Direct2D1ForAvalonia.Media
                 return;
             }
 
-            var startPoint = brush.StartPoint.ToPixels(destinationRect);
-            var endPoint = brush.EndPoint.ToPixels(destinationRect);
-
-            // The stop collection depends only on stops+spread (not the destination rect), so it is
-            // cached across frames. It is owned by the cache and must not be disposed here — the D2D
-            // brush AddRefs it internally.
-            var stops = deviceResources.GetOrCreateGradientStops(target, brush.GradientStops, brush.SpreadMethod);
-
-            PlatformBrush = target.CreateLinearGradientBrush(
-                new LinearGradientBrushProperties
-                {
-                    StartPoint = startPoint.ToVortice(),
-                    EndPoint = endPoint.ToVortice()
-                },
-                new BrushProperties
-                {
-                    Opacity = (float)brush.Opacity,
-                    Transform = BrushTransform.Apply(brush, destinationRect, Matrix.Identity).ToDirect2D(),
-                },
-                stops);
+            // Full brush (stops + pixel start/end + opacity + transform) is device-cached so
+            // template UI and GradientFill do not CreateLinearGradientBrush every draw.
+            PlatformBrush = deviceResources.GetOrCreateLinearGradientBrush(target, brush, destinationRect);
+            IsCached = true;
         }
     }
 }

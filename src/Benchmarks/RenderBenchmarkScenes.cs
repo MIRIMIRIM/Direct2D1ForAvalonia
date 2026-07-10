@@ -55,6 +55,9 @@ internal static class RenderBenchmarkScenes
     private static readonly IBrush[] s_mixedBottomBrushes = CreateMixedBottomBrushes();
     private static readonly IBrush[] s_ellipseBrushes = CreateEllipseBrushes();
 
+    // Shared synthetic image for ImageBlit — lazy so platform is initialised first.
+    private static IImage? s_blitImage;
+
     public static readonly RenderBenchScene[] All =
     [
         new("SolidBrushGrid", new PixelSize(512, 512), new Vector(96, 96), 200, DrawSolidBrushGrid),
@@ -62,6 +65,7 @@ internal static class RenderBenchmarkScenes
         new("RoundedRectGrid", new PixelSize(512, 512), new Vector(96, 96), 150, DrawRoundedRectGrid),
         new("ClipLayerHeavy", new PixelSize(512, 512), new Vector(96, 96), 80, DrawClipLayerHeavy),
         new("MixedScene", new PixelSize(512, 512), new Vector(96, 96), 100, DrawMixedScene),
+        new("ImageBlit", new PixelSize(512, 512), new Vector(96, 96), 100, DrawImageBlit),
     ];
 
     public static RenderBenchScene Get(string name)
@@ -157,6 +161,63 @@ internal static class RenderBenchmarkScenes
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Tiles a shared bitmap across the surface. Stresses WIC→D2D GPU upload caching
+    /// (<see cref="MIR.Direct2D1ForAvalonia.Media.WicBitmapImpl.GetDirect2DBitmap"/>).
+    /// Steady-state should hit the device-scoped upload cache after the first frame.
+    /// </summary>
+    private static void DrawImageBlit(DrawingContext context)
+    {
+        context.DrawRectangle(Brushes.White, null, new Rect(0, 0, 512, 512));
+
+        var image = s_blitImage ??= CreateBlitImage();
+
+        // 8×8 tiles of a 64×64 bitmap → 64 DrawImage calls per frame.
+        for (var y = 0; y < 512; y += 64)
+        {
+            for (var x = 0; x < 512; x += 64)
+            {
+                context.DrawImage(image, new Rect(x, y, 64, 64));
+            }
+        }
+    }
+
+    private static IImage CreateBlitImage()
+    {
+        // WriteableBitmap → WriteableWicBitmapImpl (WIC), same path as loaded assets.
+        const int size = 64;
+        var bmp = new WriteableBitmap(
+            new PixelSize(size, size),
+            new Vector(96, 96),
+            Avalonia.Platform.PixelFormat.Bgra8888,
+            Avalonia.Platform.AlphaFormat.Premul);
+
+        using (var fb = bmp.Lock())
+        {
+            var rowBytes = fb.RowBytes;
+            var height = size;
+            var width = size;
+            // Fill a checker gradient without unsafe so AOT/unsafe project flags stay clean.
+            var buffer = new byte[rowBytes * height];
+            for (var y = 0; y < height; y++)
+            {
+                var row = y * rowBytes;
+                for (var x = 0; x < width; x++)
+                {
+                    var i = row + x * 4;
+                    buffer[i + 0] = (byte)(x * 4);
+                    buffer[i + 1] = (byte)(y * 4);
+                    buffer[i + 2] = (byte)(128 + (x ^ y));
+                    buffer[i + 3] = 255;
+                }
+            }
+
+            System.Runtime.InteropServices.Marshal.Copy(buffer, 0, fb.Address, buffer.Length);
+        }
+
+        return bmp;
     }
 
     /// <summary>

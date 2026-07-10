@@ -27,7 +27,18 @@ namespace MIR.Direct2D1ForAvalonia.Media;
 /// </summary>
 internal sealed class SolidRectBatch
 {
-    private const int MultiStrokeThreshold = 2;
+    // Prefer N× DrawRoundedRectangle/DrawRectangle over Create*Geometry + GeometryGroup.
+    // A/B (RoundedRectGrid, 150×7, d2d-gpu steady): threshold=2 (group) ~0.235ms/iter vs
+    // always-direct ~see opt-stroke-direct.json. GeometryGroup only wins at very large N;
+    // with command-list record the group path also bakes expensive COM geometry into the CL.
+    // Keep direct for all practical UI stroke batches (chrome grids are tens–hundreds of cells).
+    private const int MultiStrokeThreshold = int.MaxValue;
+
+    /// <summary>
+    /// Minimum simple ops before we invest in recording a command list. Tiny sessions never
+    /// amortize CreateCommandList + second ExecuteOps pass.
+    /// </summary>
+    private const int MinOpsToRecordCommandList = 8;
 
     private readonly List<StrokeEntry> _strokes = new(64);
     private readonly List<SimpleRectOp> _ops = new(128);
@@ -40,6 +51,13 @@ internal sealed class SolidRectBatch
     private bool _active;
     private int _pixelW;
     private int _pixelH;
+
+    // Adaptive CL: only record after two consecutive identical simple sessions on this batch
+    // (same content hash + op count, op count ≥ MinOpsToRecordCommandList). Dynamic frames that
+    // never repeat pay a single ExecuteOps; static UIs still reach steady-state DrawImage.
+    private long _lastEndedContentHash;
+    private int _lastEndedOpCount;
+    private bool _hasLastEndedSession;
 
     /// <summary>True when this session is logging simple rects without immediate GPU fills.</summary>
     public bool IsDeferredSimpleSession => _deferSimpleSession && _sessionOnlySimple;
@@ -287,7 +305,9 @@ internal sealed class SolidRectBatch
             if (_deferSimpleSession && _sessionOnlySimple && _ops.Count > 0)
             {
                 DebugDeferredEnds++;
-                if (resources.TryGetCommandList(ContentHash, _pixelW, _pixelH, out var cached))
+                var contentHash = ContentHash;
+                var opCount = _ops.Count;
+                if (resources.TryGetCommandList(contentHash, _pixelW, _pixelH, out var cached))
                 {
                     // Steady-state: one DrawImage replaces N fills + strokes (composition intermediate
                     // dirty repaint when content hash matches a prior paint on this device).
@@ -301,14 +321,22 @@ internal sealed class SolidRectBatch
                     {
                         cached.Dispose();
                     }
+                    RememberEndedSession(contentHash, opCount);
                     return;
                 }
 
-                // Cold / content-changed: paint with multi-stroke batching, then store a CL for
-                // the next identical session (including a brand-new DrawingContextImpl).
+                // Miss: always paint once. Only record a CL when this session matches the previous
+                // ended simple session (stable content) and is large enough to amortize record cost.
+                // Dynamic / once-off scenes never pay the second ExecuteOps walk.
                 CommandListMisses++;
                 ExecuteOps(dc, resources, buildStrokeBatch: true);
-                TryRecordOpsToCommandListStoreOnly(dc, resources, sessionTarget);
+                var stableRepeat = _hasLastEndedSession
+                    && contentHash == _lastEndedContentHash
+                    && opCount == _lastEndedOpCount
+                    && opCount >= MinOpsToRecordCommandList;
+                if (stableRepeat)
+                    TryRecordOpsToCommandListStoreOnly(dc, resources, sessionTarget);
+                RememberEndedSession(contentHash, opCount);
                 return;
             }
 
@@ -399,6 +427,13 @@ internal sealed class SolidRectBatch
 
         if (buildStrokeBatch)
             FlushStrokes(dc, resources);
+    }
+
+    private void RememberEndedSession(long contentHash, int opCount)
+    {
+        _lastEndedContentHash = contentHash;
+        _lastEndedOpCount = opCount;
+        _hasLastEndedSession = true;
     }
 
     /// <summary>
